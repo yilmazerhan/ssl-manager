@@ -1,6 +1,10 @@
 package order
 
-import "time"
+import (
+	"time"
+
+	"github.com/yilmazerhan/ssl-manager/backend/internal/ca"
+)
 
 type Status string
 
@@ -13,25 +17,32 @@ const (
 )
 
 type Order struct {
-	ID               string    `json:"id"`
-	RequestedBy      string    `json:"requested_by"`
-	OwningTeam       string    `json:"owning_team"`
-	Domains          []string  `json:"domains"`
-	CAProvider       string    `json:"ca_provider"`
-	ValidationMethod string    `json:"validation_method"`
-	Status           Status    `json:"status"`
-	Challenge        Challenge `json:"challenge,omitempty"`
-	CertificateID    string    `json:"certificate_id,omitempty"`
-	Error            string    `json:"error,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	CompletedAt      time.Time `json:"completed_at,omitempty"`
+	ID               string           `json:"id"`
+	RequestedBy      string           `json:"requested_by"`
+	OwningTeam       string           `json:"owning_team"`
+	Domains          []string         `json:"domains"`
+	CAProvider       string           `json:"ca_provider"`
+	ValidationMethod string           `json:"validation_method"`
+	KeyAlgorithm     string           `json:"key_algorithm"`
+	Status           Status           `json:"status"`
+	Challenges       ca.ProviderOrder `json:"challenges"`
+	KeyRef           string           `json:"-"`
+	CSRPEM           string           `json:"-"`
+	CertificateID    string           `json:"certificate_id,omitempty"`
+	Error            string           `json:"error,omitempty"`
+	AttemptCount     int              `json:"attempt_count"`
+	CreatedAt        time.Time        `json:"created_at"`
+	CompletedAt      *time.Time       `json:"completed_at,omitempty"`
 }
 
-type Challenge struct {
-	Type         string `json:"type"`
-	ResourceName string `json:"resource_name"`
-	Value        string `json:"value"`
-	Verified     bool   `json:"verified"`
+// Public returns a copy safe to send to a client: the provider's internal
+// bookkeeping (ACME order/authorization URLs, ZeroSSL certificate IDs) is
+// dropped, leaving only the challenges a human or automation needs to act
+// on.
+func (o Order) Public() Order {
+	sanitized := o
+	sanitized.Challenges = ca.ProviderOrder{Challenges: o.Challenges.Challenges}
+	return sanitized
 }
 
 type CreateRequest struct {

@@ -48,6 +48,8 @@ body {
 .sidebar {
   padding: 24px 16px;
   border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
 }
 .sidebar .brand { font-size: 18px; font-weight: 700; margin-bottom: 24px; }
 .sidebar nav { display: flex; flex-direction: column; gap: 4px; }

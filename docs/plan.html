@@ -564,17 +564,19 @@
         <tbody>
           <tr><td><span class="method get">GET</span></td><td class="endpoint">/api/v1/certificates</td><td class="wrap">List/search/filter inventory</td><td><span class="pill accent">certs:read</span></td></tr>
           <tr><td><span class="method get">GET</span></td><td class="endpoint">/api/v1/certificates/{id}</td><td class="wrap">Full metadata for one certificate</td><td><span class="pill accent">certs:read</span></td></tr>
-          <tr><td><span class="method get">GET</span></td><td class="endpoint">/api/v1/certificates/{id}/download</td><td class="wrap">Fetch PEM / chain / key bundle</td><td><span class="pill warn">certs:export</span></td></tr>
+          <tr><td><span class="method post">POST</span></td><td class="endpoint">/api/v1/certificates/{id}/download-token</td><td class="wrap">Issue a short-lived, single-use download token</td><td><span class="pill warn">certs:export</span></td></tr>
+          <tr><td><span class="method get">GET</span></td><td class="endpoint">/api/v1/certificates/{id}/download?token=…</td><td class="wrap">Redeem that token for the certificate + chain</td><td><span class="pill warn">certs:export</span></td></tr>
           <tr><td><span class="method get">GET</span></td><td class="endpoint">/api/v1/certificates/{id}/history</td><td class="wrap">Prior versions and renewal events</td><td><span class="pill accent">certs:read</span></td></tr>
+          <tr><td><span class="method get">GET</span></td><td class="endpoint">/api/v1/certificates/{id}/audit</td><td class="wrap">Audit trail for this certificate</td><td><span class="pill accent">certs:read</span></td></tr>
           <tr><td><span class="method post">POST</span></td><td class="endpoint">/api/v1/certificate-orders</td><td class="wrap">Start a from-scratch order: domains, CA, validation method</td><td><span class="pill warn">certs:issue</span></td></tr>
           <tr><td><span class="method get">GET</span></td><td class="endpoint">/api/v1/certificate-orders/{id}</td><td class="wrap">Poll order status and challenge instructions</td><td><span class="pill accent">certs:read</span></td></tr>
           <tr><td><span class="method post">POST</span></td><td class="endpoint">/api/v1/certificate-orders/{id}/validate</td><td class="wrap">Trigger a validation check for a manual challenge</td><td><span class="pill warn">certs:issue</span></td></tr>
           <tr><td><span class="method post">POST</span></td><td class="endpoint">/api/v1/certificates/{id}/renew</td><td class="wrap">Trigger renewal on demand</td><td><span class="pill warn">certs:issue</span></td></tr>
-          <tr><td><span class="method delete">DELETE</span></td><td class="endpoint">/api/v1/certificates/{id}</td><td class="wrap">Revoke and retire a certificate</td><td><span class="pill critical">certs:admin</span></td></tr>
+          <tr><td><span class="method post">POST</span></td><td class="endpoint">/api/v1/certificates/{id}/revoke</td><td class="wrap">Revoke and retire a certificate</td><td><span class="pill critical">certs:admin</span></td></tr>
         </tbody>
       </table>
     </div>
-    <p>Issuing a certificate from scratch is asynchronous, so it's modeled as a resource of its own — <code>certificate_order</code> — rather than a single call that blocks until a CA responds. An order resolves into a normal <code>certificate</code> once <code>status</code> reaches <code>issued</code>, at which point the usual read/download/renew endpoints apply to it. Every request is logged with caller identity, scope used, and resource touched. Downloads of key material additionally require a short-lived, single-use download token issued after an explicit UI confirmation — an API key alone cannot silently exfiltrate a private key.</p>
+    <p>Issuing a certificate from scratch is asynchronous, so it's modeled as a resource of its own — <code>certificate_order</code> — rather than a single call that blocks until a CA responds. An order resolves into a normal <code>certificate</code> once <code>status</code> reaches <code>issued</code>, at which point the usual read/download/renew endpoints apply to it. Every request is logged with caller identity, scope used, and resource touched. The download endpoint returns the certificate and its chain, never a private key — every certificate's key lives in Vault as a non-exportable key (section 09) and is never in a position to be downloaded, by anyone, regardless of scope. The token still gates the download because knowing which certificates exist and pulling their material is itself worth an audit trail and a deliberate action, not because a key could leak through it.</p>
   </section>
 
   <section id="webui">
@@ -604,7 +606,7 @@
   <section id="security">
     <h2><span class="section-num">09</span> Key &amp; secret handling</h2>
     <ul class="plain">
-      <li>Private keys are generated and stored in Vault (or a cloud KMS); Postgres holds only a reference, never the key bytes.</li>
+      <li>Private keys are generated inside Vault's Transit engine as non-exportable keys and never leave it — CSRs are produced by asking Vault to sign a digest remotely (a <code>crypto.Signer</code> backed by the Transit key), so the key is never in this app's memory, in Postgres, or exportable by any role. Postgres holds only the Transit key's name.</li>
       <li>Certificate PEMs and chains are encrypted at rest with envelope encryption; TLS in transit everywhere, including between internal services.</li>
       <li>ACME account keys and ZeroSSL API credentials are themselves Vault secrets, scoped per environment, rotated on a schedule.</li>
       <li>Every read, download, issuance, and renewal writes an append-only audit row — who, what, when, from where.</li>
@@ -673,7 +675,7 @@
       <table class="data">
         <thead><tr><th>Severity</th><th class="wrap">Risk</th><th class="wrap">Mitigation</th></tr></thead>
         <tbody>
-          <tr><td><span class="risk-sev high"></span>High</td><td class="wrap">Private key leaked via API or UI</td><td class="wrap">Keys never leave Vault unencrypted; download requires MFA + short-lived token; every export audited</td></tr>
+          <tr><td><span class="risk-sev high"></span>High</td><td class="wrap">Private key leaked via API or UI</td><td class="wrap">Keys are non-exportable Vault Transit keys — there is no key file for any role or endpoint to ever return; downloads (cert + chain only) still require a short-lived, single-use token, and every export is audited</td></tr>
           <tr><td><span class="risk-sev high"></span>High</td><td class="wrap">Renewal worker down during a renewal window</td><td class="wrap">Two replicas with leader lock; alert if no successful scan in 24h</td></tr>
           <tr><td><span class="risk-sev med"></span>Medium</td><td class="wrap">Let's Encrypt rate limits hit during retries</td><td class="wrap">Track issuance attempts per domain; backoff before resubmitting</td></tr>
           <tr><td><span class="risk-sev med"></span>Medium</td><td class="wrap">DNS provider API access needed for DNS-01 is broad in scope</td><td class="wrap">Scope credentials to TXT record management on the specific zone only</td></tr>

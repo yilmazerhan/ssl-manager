@@ -1,0 +1,182 @@
+package order
+
+import (
+	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"os"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/yilmazerhan/ssl-manager/backend/internal/ca"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/db"
+)
+
+// Integration test against a real Postgres instance for the order <->
+// certificate SQL round trip (jsonb challenge storage, array columns,
+// foreign keys); skipped unless DATABASE_URL is set.
+func testService(t *testing.T) (*Service, string) {
+	t.Helper()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set; skipping Postgres integration test")
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if err := db.Migrate(ctx, pool); err != nil {
+		t.Fatalf("db.Migrate: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	var userID string
+	email := "order-test-" + uuid.NewString() + "@example.com"
+	if err := pool.QueryRow(ctx, `INSERT INTO app_user (email, role) VALUES ($1, 'cert_manager') RETURNING id`, email).Scan(&userID); err != nil {
+		t.Fatalf("create test user: %v", err)
+	}
+
+	certs := certificate.NewPostgresStore(pool)
+	orders := NewPostgresStore(pool)
+	authorities := ca.Registry(&fakeInstantAuthority{})
+	return NewService(orders, certs, &fakeKeyManager{key: mustGenerateRSAKey(t)}, authorities), userID
+}
+
+func mustGenerateRSAKey(t *testing.T) *rsa.PrivateKey {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate test key: %v", err)
+	}
+	return key
+}
+
+type fakeKeyManager struct {
+	key *rsa.PrivateKey
+}
+
+func (f *fakeKeyManager) EnsureKey(context.Context, string, string) error { return nil }
+func (f *fakeKeyManager) Signer(context.Context, string) (crypto.Signer, error) {
+	return f.key, nil
+}
+
+// fakeInstantAuthority verifies every challenge immediately, so this test
+// exercises the order/certificate persistence layer without depending on a
+// real CA (that's what internal/ca's own tests are for).
+type fakeInstantAuthority struct{}
+
+func (a *fakeInstantAuthority) Name() string                         { return "letsencrypt" }
+func (a *fakeInstantAuthority) SupportedValidationMethods() []string { return []string{"http-01"} }
+
+func (a *fakeInstantAuthority) RequestValidation(_ context.Context, domains []string, method, _ string) (ca.ProviderOrder, error) {
+	challenges := make([]ca.Challenge, len(domains))
+	for i, d := range domains {
+		challenges[i] = ca.Challenge{Domain: d, Type: method}
+	}
+	return ca.ProviderOrder{Challenges: challenges}, nil
+}
+
+func (a *fakeInstantAuthority) CheckChallenge(_ context.Context, po ca.ProviderOrder) (ca.ProviderOrder, error) {
+	for i := range po.Challenges {
+		po.Challenges[i].Verified = true
+	}
+	return po, nil
+}
+
+func (a *fakeInstantAuthority) Issue(_ context.Context, _ ca.ProviderOrder, _ string, domains []string) (ca.IssuedCertificate, error) {
+	return ca.IssuedCertificate{
+		PEMCert: "fake-cert", PEMChain: "fake-chain", SerialNumber: "42", FingerprintSHA256: "deadbeef",
+	}, nil
+}
+
+func TestService_CreateAndValidate_IssuesCertificate(t *testing.T) {
+	svc, userID := testService(t)
+	ctx := context.Background()
+
+	created, err := svc.Create(ctx, CreateRequest{
+		RequestedBy: userID, OwningTeam: "platform-test",
+		Domains: []string{"order-svc-test.example.com"}, CAProvider: "letsencrypt", ValidationMethod: "http-01",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.Status != StatusAwaitingValidation {
+		t.Fatalf("expected awaiting_validation, got %s", created.Status)
+	}
+	if created.KeyRef == "" {
+		t.Fatalf("expected a key ref to be assigned")
+	}
+
+	// Round-trip through Postgres: Get should return exactly what Create
+	// persisted, including the jsonb challenge payload.
+	reloaded, err := svc.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(reloaded.Challenges.Challenges) != 1 {
+		t.Fatalf("expected 1 challenge to round-trip through Postgres, got %d", len(reloaded.Challenges.Challenges))
+	}
+
+	validated, err := svc.Validate(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if validated.Status != StatusIssued {
+		t.Fatalf("expected issued, got %s (%s)", validated.Status, validated.Error)
+	}
+	if validated.CertificateID == "" {
+		t.Fatalf("expected a certificate ID to be set")
+	}
+}
+
+func TestService_CreateRenewal_UpdatesExistingCertificate(t *testing.T) {
+	svc, userID := testService(t)
+	ctx := context.Background()
+
+	created, err := svc.Create(ctx, CreateRequest{
+		RequestedBy: userID, OwningTeam: "platform-test",
+		Domains: []string{"renewal-svc-test.example.com"}, CAProvider: "letsencrypt", ValidationMethod: "http-01",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	issued, err := svc.Validate(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	cert, err := svc.certs.Get(ctx, issued.CertificateID)
+	if err != nil {
+		t.Fatalf("Get certificate: %v", err)
+	}
+
+	renewalOrder, err := svc.CreateRenewal(ctx, cert, userID)
+	if err != nil {
+		t.Fatalf("CreateRenewal: %v", err)
+	}
+	if renewalOrder.CertificateID != cert.ID {
+		t.Fatalf("expected renewal order to target the existing certificate, got %s want %s", renewalOrder.CertificateID, cert.ID)
+	}
+	if renewalOrder.KeyRef != cert.KeyRef {
+		t.Fatalf("expected renewal to reuse the existing key, got %s want %s", renewalOrder.KeyRef, cert.KeyRef)
+	}
+
+	renewed, err := svc.Validate(ctx, renewalOrder.ID)
+	if err != nil {
+		t.Fatalf("Validate renewal: %v", err)
+	}
+	if renewed.Status != StatusIssued {
+		t.Fatalf("expected renewal to issue, got %s (%s)", renewed.Status, renewed.Error)
+	}
+
+	versions, err := svc.certs.Versions(ctx, cert.ID)
+	if err != nil {
+		t.Fatalf("Versions: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("expected 2 versions after a renewal (initial + renewed), got %d", len(versions))
+	}
+}

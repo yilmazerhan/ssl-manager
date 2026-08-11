@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, CertificateOrder } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
 
 type Step = "domains" | "authority" | "validation" | "review" | "challenge" | "done";
 
@@ -26,15 +27,17 @@ const VALIDATION_METHODS: Record<string, { value: string; label: string }[]> = {
 
 export default function NewCertificateWizard() {
   const navigate = useNavigate();
+  const { identity } = useAuth();
   const [step, setStep] = useState<Step>("domains");
   const [domainsInput, setDomainsInput] = useState("");
   const [caProvider, setCaProvider] = useState("letsencrypt");
   const [validationMethod, setValidationMethod] = useState("http-01");
-  const [owningTeam, setOwningTeam] = useState("");
+  const [owningTeam, setOwningTeam] = useState(identity?.team ?? "");
   const [order, setOrder] = useState<CertificateOrder | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
 
+  const canPickTeam = identity?.role === "admin";
   const domains = domainsInput
     .split(",")
     .map((d) => d.trim())
@@ -44,8 +47,7 @@ export default function NewCertificateWizard() {
     setError(null);
     try {
       const created = await api.createOrder({
-        requested_by: "current-user",
-        owning_team: owningTeam || "unassigned",
+        owning_team: owningTeam || identity?.team || "unassigned",
         domains,
         ca_provider: caProvider,
         validation_method: validationMethod,
@@ -72,6 +74,8 @@ export default function NewCertificateWizard() {
       setChecking(false);
     }
   }
+
+  const challenges = order?.challenges?.challenges ?? [];
 
   return (
     <>
@@ -100,7 +104,15 @@ export default function NewCertificateWizard() {
           </div>
           <div className="field">
             <label>Owning team</label>
-            <input value={owningTeam} onChange={(e) => setOwningTeam(e.target.value)} placeholder="platform" />
+            <input
+              value={owningTeam}
+              onChange={(e) => setOwningTeam(e.target.value)}
+              placeholder="platform"
+              disabled={!canPickTeam}
+            />
+            {!canPickTeam && (
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>Certificates you request belong to your own team.</span>
+            )}
           </div>
           <button className="primary" disabled={domains.length === 0} onClick={() => setStep("authority")}>
             Continue
@@ -165,10 +177,10 @@ export default function NewCertificateWizard() {
             <strong>Validation:</strong> {validationMethod}
           </p>
           <p>
-            <strong>Owning team:</strong> {owningTeam || "unassigned"}
+            <strong>Owning team:</strong> {owningTeam || identity?.team || "unassigned"}
           </p>
           <p style={{ color: "var(--muted)", fontSize: 13 }}>
-            A key pair is generated for this certificate when you submit — it never leaves the server.
+            A key pair is generated for this certificate in Vault when you submit — it never leaves the server, not even to us.
           </p>
           <button className="secondary" onClick={() => setStep("validation")} style={{ marginRight: 8 }}>
             Back
@@ -179,12 +191,18 @@ export default function NewCertificateWizard() {
         </div>
       )}
 
-      {step === "challenge" && order?.challenge && (
+      {step === "challenge" && challenges.length > 0 && (
         <div className="card">
-          <p>Prove you control {domains[0]} by publishing this before checking again:</p>
-          <p style={{ fontSize: 13, color: "var(--muted)" }}>{order.challenge.type}</p>
-          <code className="challenge-value">{order.challenge.resource_name}</code>
-          <code className="challenge-value">{order.challenge.value}</code>
+          <p>Prove you control {challenges.length === 1 ? "this domain" : "these domains"} by publishing the following before checking again:</p>
+          {challenges.map((c) => (
+            <div key={c.domain} style={{ marginBottom: 12 }}>
+              <p style={{ fontSize: 13, color: "var(--muted)", marginBottom: 4 }}>
+                {c.domain} · {c.type} {c.verified ? "· verified" : ""}
+              </p>
+              <code className="challenge-value">{c.resource_name}</code>
+              <code className="challenge-value">{c.value}</code>
+            </div>
+          ))}
           <button className="primary" onClick={checkNow} disabled={checking}>
             {checking ? "Checking…" : "Check now"}
           </button>
