@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/main.tsx","./src/api/client.ts","./src/components/StatusPill.tsx","./src/pages/CertificateDetail.tsx","./src/pages/Dashboard.tsx","./src/pages/Inventory.tsx","./src/pages/NewCertificateWizard.tsx"],"version":"5.9.3"}

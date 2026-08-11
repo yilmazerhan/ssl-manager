@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SSL Sentry</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --surface: #ffffff;
+    --surface-2: #eceff2;
+    --border: #dbe0e6;
+    --text: #161a20;
+    --muted: #5c6570;
+    --accent: #1e5f74;
+    --accent-soft: rgba(30,95,116,0.10);
+    --ok: #2f8f5b;
+    --ok-soft: rgba(47,143,91,0.12);
+    --warn: #a5731f;
+    --warn-soft: rgba(182,134,44,0.14);
+    --critical: #ac3b32;
+    --critical-soft: rgba(193,68,60,0.12);
+    --shadow: 0 1px 2px rgba(20,24,30,0.04), 0 8px 24px rgba(20,24,30,0.05);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #10151a;
+      --surface: #171d23;
+      --surface-2: #1d242b;
+      --border: #2b333a;
+      --text: #e7ebee;
+      --muted: #9aa5ad;
+      --accent: #5aacc0;
+      --accent-soft: rgba(90,172,192,0.14);
+      --ok: #55b585;
+      --ok-soft: rgba(85,181,133,0.14);
+      --warn: #d1a054;
+      --warn-soft: rgba(209,160,84,0.16);
+      --critical: #de776e;
+      --critical-soft: rgba(222,119,110,0.16);
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #10151a;
+    --surface: #171d23;
+    --surface-2: #1d242b;
+    --border: #2b333a;
+    --text: #e7ebee;
+    --muted: #9aa5ad;
+    --accent: #5aacc0;
+    --accent-soft: rgba(90,172,192,0.14);
+    --ok: #55b585;
+    --ok-soft: rgba(85,181,133,0.14);
+    --warn: #d1a054;
+    --warn-soft: rgba(209,160,84,0.16);
+    --critical: #de776e;
+    --critical-soft: rgba(222,119,110,0.16);
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, .brand {
+    font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+    text-wrap: balance;
+  }
+
+  code, .mono, table.data, .kv, .endpoint {
+    font-family: "SF Mono", "Cascadia Code", Consolas, "Roboto Mono", monospace;
+  }
+
+  a { color: var(--accent); }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 260px minmax(0,1fr);
+    max-width: 1180px;
+    margin: 0 auto;
+    align-items: start;
+  }
+
+  /* ---- Sidebar / TOC ---- */
+  nav.toc {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 40px 20px 40px 32px;
+    border-right: 1px solid var(--border);
+  }
+  .brand {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .brand-sub {
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 28px;
+  }
+  nav.toc ol {
+    list-style: none;
+    counter-reset: toc;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  nav.toc li { counter-increment: toc; }
+  nav.toc a {
+    display: flex;
+    gap: 10px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 13.5px;
+  }
+  nav.toc a:hover { background: var(--surface-2); color: var(--text); }
+  nav.toc a::before {
+    content: counter(toc, decimal-leading-zero);
+    color: var(--accent);
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 12px;
+    flex-shrink: 0;
+    padding-top: 1px;
+  }
+
+  /* ---- Main ---- */
+  main { padding: 56px 48px 100px; min-width: 0; }
+
+  .doc-head { margin-bottom: 48px; padding-bottom: 32px; border-bottom: 1px solid var(--border); }
+  .eyebrow {
+    display: inline-block;
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 4px 10px;
+    border-radius: 4px;
+    margin-bottom: 18px;
+  }
+  .doc-head h1 { font-size: 38px; font-weight: 600; line-height: 1.15; margin-bottom: 14px; }
+  .doc-head p { color: var(--muted); font-size: 16px; max-width: 62ch; }
+  .meta-row { display: flex; gap: 28px; margin-top: 24px; flex-wrap: wrap; }
+  .meta-row div { font-size: 12.5px; color: var(--muted); }
+  .meta-row b { color: var(--text); display: block; font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+
+  section { margin-bottom: 64px; scroll-margin-top: 24px; }
+  section h2 {
+    font-size: 24px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  section .section-num { color: var(--accent); font-family: "SF Mono", Consolas, monospace; font-size: 15px; font-weight: 500; }
+  section > .lede { color: var(--muted); max-width: 68ch; margin-bottom: 24px; }
+  section h3 { font-size: 16.5px; font-weight: 600; margin: 28px 0 12px; }
+  p { max-width: 68ch; margin-bottom: 14px; }
+  ul.plain, ol.plain { max-width: 68ch; padding-left: 20px; margin-bottom: 14px; }
+  ul.plain li, ol.plain li { margin-bottom: 6px; }
+
+  /* ---- Cards / grid ---- */
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap: 14px; margin: 20px 0; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+    box-shadow: var(--shadow);
+  }
+  .card h4 { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+  .card p { font-size: 13.5px; color: var(--muted); margin: 0; }
+
+  /* ---- Architecture diagram ---- */
+  .diagram {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    margin: 20px 0;
+    box-shadow: var(--shadow);
+    overflow-x: auto;
+  }
+  .tier { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: nowrap; }
+  .tier:last-child { margin-bottom: 0; }
+  .node {
+    flex: 1;
+    min-width: 150px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-size: 13px;
+  }
+  .node .t { font-weight: 600; margin-bottom: 3px; }
+  .node .d { color: var(--muted); font-size: 12px; line-height: 1.4; }
+  .node.accent { border-color: var(--accent); background: var(--accent-soft); }
+  .arrow-row { text-align: center; color: var(--muted); font-size: 12px; margin: 4px 0; }
+
+  /* ---- Tables ---- */
+  .table-wrap { overflow-x: auto; margin: 18px 0; }
+  table.data {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    min-width: 560px;
+  }
+  table.data caption { text-align: left; font-family: -apple-system, sans-serif; color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+  table.data th, table.data td {
+    text-align: left;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  table.data td.wrap, table.data th.wrap { white-space: normal; }
+  table.data th {
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    font-family: -apple-system, sans-serif;
+  }
+  table.data tr:last-child td { border-bottom: none; }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: -apple-system, sans-serif;
+  }
+  .pill.ok { background: var(--ok-soft); color: var(--ok); }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pill.critical { background: var(--critical-soft); color: var(--critical); }
+  .pill.accent { background: var(--accent-soft); color: var(--accent); }
+
+  .method { font-weight: 700; font-size: 11.5px; padding: 2px 6px; border-radius: 4px; }
+  .method.get { color: var(--ok); background: var(--ok-soft); }
+  .method.post { color: var(--accent); background: var(--accent-soft); }
+  .method.delete { color: var(--critical); background: var(--critical-soft); }
+
+  /* ---- Timeline (roadmap) ---- */
+  .timeline { position: relative; margin: 20px 0; padding-left: 28px; border-left: 2px solid var(--border); }
+  .phase { position: relative; padding-bottom: 28px; }
+  .phase:last-child { padding-bottom: 0; }
+  .phase::before {
+    content: '';
+    position: absolute;
+    left: -34px;
+    top: 4px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--bg);
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+  .phase .ph-title { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+  .phase .ph-title span { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 8px; font-family: "SF Mono", Consolas, monospace; }
+  .phase p { font-size: 13.5px; color: var(--muted); margin-bottom: 0; }
+
+  /* ---- Risk table ---- */
+  .risk-sev { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .risk-sev.high { background: var(--critical); }
+  .risk-sev.med { background: var(--warn); }
+  .risk-sev.low { background: var(--ok); }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding-top: 24px;
+    color: var(--muted);
+    font-size: 12.5px;
+  }
+
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc { position: relative; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
+    main { padding: 32px 20px 80px; }
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    a, .node { transition: background-color 0.15s ease, border-color 0.15s ease; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc">
+  <div class="brand">SSL Sentry</div>
+  <div class="brand-sub">Architecture &amp; Delivery Plan</div>
+  <ol>
+    <li><a href="#overview">Overview &amp; scope</a></li>
+    <li><a href="#architecture">System architecture</a></li>
+    <li><a href="#data-model">Data model</a></li>
+    <li><a href="#ca-integrations">CA integrations</a></li>
+    <li><a href="#creation-flow">Certificate creation flow</a></li>
+    <li><a href="#renewal">Renewal engine</a></li>
+    <li><a href="#api">API design</a></li>
+    <li><a href="#webui">Web UI &amp; access control</a></li>
+    <li><a href="#security">Key &amp; secret handling</a></li>
+    <li><a href="#notifications">Notifications</a></li>
+    <li><a href="#stack">Technology stack</a></li>
+    <li><a href="#roadmap">Delivery roadmap</a></li>
+    <li><a href="#risks">Risks &amp; mitigations</a></li>
+  </ol>
+</nav>
+
+<main>
+  <div class="doc-head">
+    <span class="eyebrow">Planning Document</span>
+    <h1>SSL Sentry — a certificate lifecycle management platform</h1>
+    <p>A system of record for every TLS certificate the organization issues: what exists, when it expires, and how it gets renewed — with Let's Encrypt and ZeroSSL wired in as certificate authorities, a scheduler that renews before anything lapses, an API for machines, and a web UI for the people who own the domains.</p>
+    <div class="meta-row">
+      <div><b>Owner-facing</b>App &amp; Platform teams</div>
+      <div><b>Primary risk</b>Silent certificate expiry causing outages</div>
+      <div><b>CAs in scope</b>Let's Encrypt (ACME v2), ZeroSSL</div>
+      <div><b>Status</b>Proposed — for review</div>
+    </div>
+  </div>
+
+  <section id="overview">
+    <h2><span class="section-num">01</span> Overview &amp; scope</h2>
+    <p class="lede">Six capabilities were asked for. Each maps to one module below, and the modules share one database and one auth layer rather than being six separate tools glued together.</p>
+    <div class="card-grid">
+      <div class="card"><h4>Certificate store</h4><p>Encrypted storage for issued certs, chains, and private keys, with full version history.</p></div>
+      <div class="card"><h4>Inventory</h4><p>Searchable list of every cert with expiry, issuer, SANs, and owning team surfaced up front.</p></div>
+      <div class="card"><h4>CA integrations</h4><p>Let's Encrypt via ACME v2, ZeroSSL via its REST API — one abstraction, two providers.</p></div>
+      <div class="card"><h4>Renewal</h4><p>Automatic renewal ahead of expiry, plus a manual "renew now" for any certificate.</p></div>
+      <div class="card"><h4>API</h4><p>Machine-to-machine access to inventory and certificate material, scoped and audited.</p></div>
+      <div class="card"><h4>Web UI</h4><p>Authenticated download of certs and keys, gated by role, with every fetch logged.</p></div>
+    </div>
+  </section>
+
+  <section id="architecture">
+    <h2><span class="section-num">02</span> System architecture</h2>
+    <p class="lede">Four tiers: a web UI and API sit on shared application logic; that logic talks to a metadata database and a secrets backend; a scheduled worker drives issuance and renewal against the two certificate authorities.</p>
+
+    <div class="diagram">
+      <div class="tier">
+        <div class="node accent"><div class="t">Web UI (React)</div><div class="d">Inventory, cert detail, renewal history, new-cert wizard</div></div>
+        <div class="node accent"><div class="t">Public API</div><div class="d">REST, API-key / OAuth2 client-credential auth</div></div>
+      </div>
+      <div class="arrow-row">▾ authenticated requests ▾</div>
+      <div class="tier">
+        <div class="node"><div class="t">Application service</div><div class="d">AuthN/AuthZ, inventory logic, CA abstraction, audit logging</div></div>
+      </div>
+      <div class="arrow-row">▾</div>
+      <div class="tier">
+        <div class="node"><div class="t">PostgreSQL</div><div class="d">Certificate metadata, users, roles, audit log</div></div>
+        <div class="node"><div class="t">Vault / KMS</div><div class="d">Private keys, ACME account keys — envelope-encrypted</div></div>
+        <div class="node"><div class="t">Renewal worker</div><div class="d">Scans expiry, drives challenges, retries on failure</div></div>
+      </div>
+      <div class="arrow-row">▾ ACME v2 / REST ▾</div>
+      <div class="tier">
+        <div class="node"><div class="t">Let's Encrypt</div><div class="d">DNS-01 / HTTP-01 challenge, free, 90-day certs</div></div>
+        <div class="node"><div class="t">ZeroSSL</div><div class="d">REST API or ACME + EAB, 90-day / 1-year certs</div></div>
+      </div>
+    </div>
+
+    <h3>Why one worker, not two</h3>
+    <p>Let's Encrypt and ZeroSSL both reduce to the same three steps — prove domain control, submit a CSR, retrieve the chain — so the renewal worker talks to a single internal <code>CertificateAuthority</code> interface with two implementations, rather than special-casing a provider throughout the codebase.</p>
+  </section>
+
+  <section id="data-model">
+    <h2><span class="section-num">03</span> Data model</h2>
+    <p class="lede">Five tables carry the domain. Certificate material is versioned so a rotated key never overwrites history, and the private key itself is never stored — only a reference to where Vault holds it.</p>
+
+    <div class="table-wrap">
+      <table class="data">
+        <caption>certificate — one row per logical certificate (a domain/SAN set, renewed in place)</caption>
+        <thead><tr><th>Field</th><th class="wrap">Notes</th></tr></thead>
+        <tbody>
+          <tr><td>id</td><td class="wrap">UUID, primary key</td></tr>
+          <tr><td>common_name</td><td class="wrap">Primary domain</td></tr>
+          <tr><td>sans</td><td class="wrap">Array of additional domains covered</td></tr>
+          <tr><td>ca_provider</td><td class="wrap"><code>letsencrypt</code> / <code>zerossl</code> / <code>manual</code></td></tr>
+          <tr><td>status</td><td class="wrap"><code>active</code> / <code>expiring</code> / <code>expired</code> / <code>revoked</code></td></tr>
+          <tr><td>not_before / not_after</td><td class="wrap">Validity window of the current version</td></tr>
+          <tr><td>key_algorithm</td><td class="wrap">RSA-2048, RSA-4096, or ECDSA P-256</td></tr>
+          <tr><td>owning_team</td><td class="wrap">Drives access control and alert routing</td></tr>
+          <tr><td>auto_renew</td><td class="wrap">Boolean; renew_before_days threshold</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="table-wrap">
+      <table class="data">
+        <caption>certificate_version — immutable history; current version is the one <code>certificate</code> points to</caption>
+        <thead><tr><th>Field</th><th class="wrap">Notes</th></tr></thead>
+        <tbody>
+          <tr><td>certificate_id</td><td class="wrap">Foreign key to certificate</td></tr>
+          <tr><td>serial_number / fingerprint_sha256</td><td class="wrap">From the issued cert, for lookup and CT log cross-check</td></tr>
+          <tr><td>pem_cert / pem_chain</td><td class="wrap">Stored encrypted at rest</td></tr>
+          <tr><td>private_key_ref</td><td class="wrap">Pointer into Vault — the key itself never lives in Postgres</td></tr>
+          <tr><td>issued_at</td><td class="wrap">Timestamp from the CA response</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="table-wrap">
+      <table class="data">
+        <caption>certificate_order — tracks a from-scratch request while validation and issuance are in flight; resolves into a certificate on success</caption>
+        <thead><tr><th>Field</th><th class="wrap">Notes</th></tr></thead>
+        <tbody>
+          <tr><td>requested_by / owning_team</td><td class="wrap">Who asked, and who the resulting certificate belongs to</td></tr>
+          <tr><td>domains</td><td class="wrap">Common name + SANs requested</td></tr>
+          <tr><td>ca_provider / validation_method</td><td class="wrap">Chosen in steps 2–3 of the wizard</td></tr>
+          <tr><td>status</td><td class="wrap"><code>draft</code> / <code>awaiting_validation</code> / <code>issuing</code> / <code>issued</code> / <code>failed</code></td></tr>
+          <tr><td>challenge_details</td><td class="wrap">Record/file the CA expects, and what's been observed so far</td></tr>
+          <tr><td>csr / key_ref</td><td class="wrap">Generated in step 4; key_ref points to Vault, same as on <code>certificate_version</code></td></tr>
+          <tr><td>certificate_id</td><td class="wrap">Set once issued — links the order to the certificate it produced</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card-grid">
+      <div class="card"><h4>ca_account</h4><p>Per-provider account key / EAB credentials, one row per environment (prod, staging).</p></div>
+      <div class="card"><h4>user / role / permission</h4><p>RBAC: who can view, request, renew, or download key material.</p></div>
+      <div class="card"><h4>audit_log</h4><p>Append-only record of every view, download, issuance, and renewal, by whom.</p></div>
+    </div>
+  </section>
+
+  <section id="ca-integrations">
+    <h2><span class="section-num">04</span> CA integrations</h2>
+    <p class="lede">Both providers are ACME-capable, but the plan uses each one's strongest path rather than forcing both through identical plumbing.</p>
+
+    <h3>Let's Encrypt — ACME v2</h3>
+    <ul class="plain">
+      <li>Integrate via a maintained ACME client library (e.g. <code>lego</code> for Go, <code>acme.sh</code>/<code>certbot</code> if shelling out is acceptable) rather than implementing ACME from scratch.</li>
+      <li><b>HTTP-01</b> challenge for single, internet-reachable domains — simplest path, no DNS API access needed.</li>
+      <li><b>DNS-01</b> challenge for wildcards and internal/non-public domains — requires a DNS provider plugin (Route 53, Cloudflare, etc.) with scoped write access to create the <code>_acme-challenge</code> TXT record.</li>
+      <li>Certificates are valid 90 days; the renewal engine targets 30 days before expiry by default.</li>
+      <li>Rate limits apply per registered domain per week — the app tracks issuance attempts to avoid hitting them during retries.</li>
+    </ul>
+
+    <h3>ZeroSSL</h3>
+    <ul class="plain">
+      <li>Two integration paths exist; the plan uses the <b>native REST API</b> (api.zerossl.com) as the default, since it needs no ACME client and supports CSR upload directly.</li>
+      <li><b>ACME + External Account Binding (EAB)</b> is kept as a fallback path for environments that already run an ACME client and just want to point it at a second CA.</li>
+      <li>Domain validation via CNAME or HTTP file token — email validation is avoided for automation since it requires a human to click a link.</li>
+      <li>ZeroSSL supports 90-day free certs and paid multi-year certs; both are modeled the same way in <code>certificate</code>.</li>
+    </ul>
+
+    <div class="table-wrap">
+      <table class="data">
+        <caption>Provider comparison as implemented behind the CertificateAuthority interface</caption>
+        <thead><tr><th>Capability</th><th>Let's Encrypt</th><th>ZeroSSL</th></tr></thead>
+        <tbody>
+          <tr><td>Protocol</td><td>ACME v2</td><td>REST API (ACME + EAB as fallback)</td></tr>
+          <tr><td>Cost</td><td>Free</td><td>Free tier + paid multi-year</td></tr>
+          <tr><td>Validity</td><td>90 days</td><td>90 days / 1 year</td></tr>
+          <tr><td>Validation methods</td><td>HTTP-01, DNS-01</td><td>HTTP file, CNAME, email</td></tr>
+          <tr><td>Wildcard support</td><td>Yes (DNS-01 only)</td><td>Yes</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="creation-flow">
+    <h2><span class="section-num">05</span> Certificate creation flow</h2>
+    <p class="lede">Creating a certificate from scratch is not one atomic action — domain validation takes time, and sometimes needs a human to change a DNS record by hand. The wizard models this as an <b>order</b> that moves through states, so the user always knows what's next instead of watching a spinner.</p>
+
+    <div class="timeline">
+      <div class="phase">
+        <div class="ph-title">1 — Domains <span>user input</span></div>
+        <p>Enter the common name and any additional SANs, including wildcards (e.g. <code>*.kron.com.tr</code>). The wizard flags domains already covered by an active certificate before letting the user continue.</p>
+      </div>
+      <div class="phase">
+        <div class="ph-title">2 — Certificate authority <span>user choice</span></div>
+        <p>Choose Let's Encrypt or ZeroSSL. The wizard shows each option's validity period, wildcard support, and cost side by side before the user commits.</p>
+      </div>
+      <div class="phase">
+        <div class="ph-title">3 — Validation method <span>user choice</span></div>
+        <p>HTTP-01 (host a token file), DNS-01 (create a TXT record), or ZeroSSL's CNAME/file check. If a DNS provider is already connected with scoped credentials, DNS-01 completes automatically instead of by hand.</p>
+      </div>
+      <div class="phase">
+        <div class="ph-title">4 — Key &amp; CSR generation <span>system</span></div>
+        <p>The app generates a key pair (algorithm chosen by the user — RSA-2048/4096 or ECDSA P-256) directly inside Vault and builds the CSR from it. The private key is never returned to the browser at this or any later step.</p>
+      </div>
+      <div class="phase">
+        <div class="ph-title">5 — Prove domain control <span>system + user</span></div>
+        <p>Automated challenges complete unattended. Manual challenges show exact instructions — the record name and value, or the file path and contents — plus a "Check now" button that polls until the CA can see it.</p>
+      </div>
+      <div class="phase">
+        <div class="ph-title">6 — Issuance <span>system</span></div>
+        <p>Once validation passes, the CSR is submitted to the chosen CA. The order polls the CA until the signed certificate and chain come back.</p>
+      </div>
+      <div class="phase">
+        <div class="ph-title">7 — Ready <span>system</span></div>
+        <p>The order resolves into a new certificate and its first version, added to inventory under the requesting user's team, with auto-renew on by default. It's downloadable immediately and tracked by the renewal engine from this point forward.</p>
+      </div>
+    </div>
+
+    <h3>Order states</h3>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th>State</th><th class="wrap">Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><span class="pill accent">draft</span></td><td class="wrap">Domains and CA chosen, not yet submitted</td></tr>
+          <tr><td><span class="pill warn">awaiting_validation</span></td><td class="wrap">Challenge issued; waiting on DNS/HTTP proof, automatic or manual</td></tr>
+          <tr><td><span class="pill warn">issuing</span></td><td class="wrap">Validation passed; CSR submitted, waiting on the CA</td></tr>
+          <tr><td><span class="pill ok">issued</span></td><td class="wrap">Certificate stored, order closed, inventory row created</td></tr>
+          <tr><td><span class="pill critical">failed</span></td><td class="wrap">Validation or issuance error, reason shown; order can be retried from step 3</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="renewal">
+    <h2><span class="section-num">06</span> Renewal engine</h2>
+    <p class="lede">One scheduled job, run daily, drives both automatic and manual renewals through the same code path — a manual "renew now" click in the UI just runs the same job early, for one certificate.</p>
+
+    <ol class="plain">
+      <li>Scan <code>certificate</code> for rows where <code>auto_renew = true</code> and days-to-expiry ≤ <code>renew_before_days</code> (default 30).</li>
+      <li>Generate a new key pair (or reuse the existing one, per policy) and a CSR for the certificate's domain set.</li>
+      <li>Submit to the recorded <code>ca_provider</code> through the CertificateAuthority interface; complete the domain validation challenge.</li>
+      <li>On success, write a new <code>certificate_version</code> row, update <code>certificate.not_after</code>, and push the new material to any downstream target (load balancer, CDN, secret store consumers).</li>
+      <li>On failure, retry with exponential backoff (up to 3 attempts across 24 hours); if still failing, escalate to a critical alert rather than retrying silently forever.</li>
+      <li>Record the outcome to <code>audit_log</code> either way.</li>
+    </ol>
+
+    <h3>Failure modes worth designing for up front</h3>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th>Failure</th><th class="wrap">Handling</th></tr></thead>
+        <tbody>
+          <tr><td>DNS/HTTP challenge unreachable</td><td class="wrap">Retry with backoff; alert owning team, not just platform team</td></tr>
+          <tr><td>CA rate limit hit</td><td class="wrap">Queue and retry after the limit window; never hammer the CA</td></tr>
+          <tr><td>Worker itself is down</td><td class="wrap">Run as two replicas with a leader lock — a missed renewal is an outage</td></tr>
+          <tr><td>Downstream push fails after issuance</td><td class="wrap">New version is already stored — retry the push independently, don't re-issue</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="api">
+    <h2><span class="section-num">07</span> API design</h2>
+    <p class="lede">A versioned REST API, authenticated with API keys or OAuth2 client-credentials for machine callers. Certificate <em>metadata</em> and certificate <em>material</em> are separate endpoints with separate scopes — reading the inventory should not imply the right to export a private key.</p>
+
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th>Method</th><th>Path</th><th class="wrap">Purpose</th><th>Scope</th></tr></thead>
+        <tbody>
+          <tr><td><span class="method get">GET</span></td><td class="endpoint">/api/v1/certificates</td><td class="wrap">List/search/filter inventory</td><td><span class="pill accent">certs:read</span></td></tr>
+          <tr><td><span class="method get">GET</span></td><td class="endpoint">/api/v1/certificates/{id}</td><td class="wrap">Full metadata for one certificate</td><td><span class="pill accent">certs:read</span></td></tr>
+          <tr><td><span class="method get">GET</span></td><td class="endpoint">/api/v1/certificates/{id}/download</td><td class="wrap">Fetch PEM / chain / key bundle</td><td><span class="pill warn">certs:export</span></td></tr>
+          <tr><td><span class="method get">GET</span></td><td class="endpoint">/api/v1/certificates/{id}/history</td><td class="wrap">Prior versions and renewal events</td><td><span class="pill accent">certs:read</span></td></tr>
+          <tr><td><span class="method post">POST</span></td><td class="endpoint">/api/v1/certificate-orders</td><td class="wrap">Start a from-scratch order: domains, CA, validation method</td><td><span class="pill warn">certs:issue</span></td></tr>
+          <tr><td><span class="method get">GET</span></td><td class="endpoint">/api/v1/certificate-orders/{id}</td><td class="wrap">Poll order status and challenge instructions</td><td><span class="pill accent">certs:read</span></td></tr>
+          <tr><td><span class="method post">POST</span></td><td class="endpoint">/api/v1/certificate-orders/{id}/validate</td><td class="wrap">Trigger a validation check for a manual challenge</td><td><span class="pill warn">certs:issue</span></td></tr>
+          <tr><td><span class="method post">POST</span></td><td class="endpoint">/api/v1/certificates/{id}/renew</td><td class="wrap">Trigger renewal on demand</td><td><span class="pill warn">certs:issue</span></td></tr>
+          <tr><td><span class="method delete">DELETE</span></td><td class="endpoint">/api/v1/certificates/{id}</td><td class="wrap">Revoke and retire a certificate</td><td><span class="pill critical">certs:admin</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Issuing a certificate from scratch is asynchronous, so it's modeled as a resource of its own — <code>certificate_order</code> — rather than a single call that blocks until a CA responds. An order resolves into a normal <code>certificate</code> once <code>status</code> reaches <code>issued</code>, at which point the usual read/download/renew endpoints apply to it. Every request is logged with caller identity, scope used, and resource touched. Downloads of key material additionally require a short-lived, single-use download token issued after an explicit UI confirmation — an API key alone cannot silently exfiltrate a private key.</p>
+  </section>
+
+  <section id="webui">
+    <h2><span class="section-num">08</span> Web UI &amp; access control</h2>
+    <div class="card-grid">
+      <div class="card"><h4>Dashboard</h4><p>Certificates expiring in 30/14/7 days front and center, plus counts by issuer and status.</p></div>
+      <div class="card"><h4>Inventory table</h4><p>Sortable, filterable by domain, issuer, environment, owning team, and expiry window.</p></div>
+      <div class="card"><h4>Certificate detail</h4><p>Chain, SANs, renewal history, and scoped download buttons — key export requires re-authentication.</p></div>
+      <div class="card"><h4>New certificate wizard</h4><p>The full from-scratch flow — domains, CA, validation, live challenge status, and the issued cert — detailed in <a href="#creation-flow">§05</a>.</p></div>
+    </div>
+
+    <h3>Roles</h3>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th>Role</th><th class="wrap">Can do</th></tr></thead>
+        <tbody>
+          <tr><td><span class="pill accent">Viewer</span></td><td class="wrap">Browse inventory and metadata, no download</td></tr>
+          <tr><td><span class="pill accent">Cert Manager</span></td><td class="wrap">Request, renew, download for certificates their team owns</td></tr>
+          <tr><td><span class="pill warn">Admin</span></td><td class="wrap">All certificates, user/role management, CA account configuration</td></tr>
+          <tr><td><span class="pill accent">API-only</span></td><td class="wrap">Scoped machine access, no UI login</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Login is via the organization's existing OIDC provider (Azure AD / Okta / Google) — no separate password store. Downloading private key material requires MFA to have been asserted in the current session, not just a valid cookie.</p>
+  </section>
+
+  <section id="security">
+    <h2><span class="section-num">09</span> Key &amp; secret handling</h2>
+    <ul class="plain">
+      <li>Private keys are generated and stored in Vault (or a cloud KMS); Postgres holds only a reference, never the key bytes.</li>
+      <li>Certificate PEMs and chains are encrypted at rest with envelope encryption; TLS in transit everywhere, including between internal services.</li>
+      <li>ACME account keys and ZeroSSL API credentials are themselves Vault secrets, scoped per environment, rotated on a schedule.</li>
+      <li>Every read, download, issuance, and renewal writes an append-only audit row — who, what, when, from where.</li>
+      <li>Access follows least privilege by default: a Cert Manager sees only their team's certificates unless explicitly granted broader scope.</li>
+    </ul>
+  </section>
+
+  <section id="notifications">
+    <h2><span class="section-num">10</span> Notifications</h2>
+    <p class="lede">Expiry is a countdown everyone should hear about more than once. Reminders escalate in urgency and audience as the deadline approaches.</p>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th>Trigger</th><th class="wrap">Audience</th><th>Channel</th></tr></thead>
+        <tbody>
+          <tr><td>30 / 14 days to expiry</td><td class="wrap">Owning team</td><td>Email</td></tr>
+          <tr><td>7 / 1 days to expiry</td><td class="wrap">Owning team + platform on-call</td><td>Email + Slack/Teams</td></tr>
+          <tr><td>Renewal succeeded</td><td class="wrap">Owning team</td><td>Slack/Teams</td></tr>
+          <tr><td>Renewal failed (final retry)</td><td class="wrap">Owning team + platform on-call</td><td>Slack/Teams + paging webhook</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="stack">
+    <h2><span class="section-num">11</span> Technology stack</h2>
+    <div class="card-grid">
+      <div class="card"><h4>Backend</h4><p>Go — pairs naturally with mature ACME tooling (<code>lego</code>) and gives the renewal worker predictable concurrency.</p></div>
+      <div class="card"><h4>Frontend</h4><p>React + TypeScript, a component library over hand-rolled CSS for the inventory table and forms.</p></div>
+      <div class="card"><h4>Database</h4><p>PostgreSQL for metadata, roles, and the audit log.</p></div>
+      <div class="card"><h4>Secrets</h4><p>HashiCorp Vault (or cloud KMS/Secrets Manager) for private keys and CA credentials.</p></div>
+      <div class="card"><h4>Scheduling</h4><p>A Kubernetes CronJob or a workflow engine (Temporal) for the renewal scan and retry logic.</p></div>
+      <div class="card"><h4>Observability</h4><p>Structured logs, metrics on renewal success rate, and the audit log itself as a compliance artifact.</p></div>
+    </div>
+  </section>
+
+  <section id="roadmap">
+    <h2><span class="section-num">12</span> Delivery roadmap</h2>
+    <p class="lede">Ordered so each phase is independently useful — the platform is worth having after Phase 1, not just after Phase 5.</p>
+    <div class="timeline">
+      <div class="phase">
+        <div class="ph-title">Phase 1 — Inventory &amp; visibility <span>MVP</span></div>
+        <p>Manual certificate upload, expiration dashboard, read-only API, OIDC login and RBAC scaffolding. Solves "we don't know what's about to expire" on day one.</p>
+      </div>
+      <div class="phase">
+        <div class="ph-title">Phase 2 — Let's Encrypt automation</div>
+        <p>ACME v2 client, HTTP-01 issuance, automatic renewal at the 30-day threshold, and the notification pipeline.</p>
+      </div>
+      <div class="phase">
+        <div class="ph-title">Phase 3 — ZeroSSL &amp; wildcards</div>
+        <p>ZeroSSL REST integration, DNS-01 challenge support for Let's Encrypt, wildcard certificate issuance for both providers.</p>
+      </div>
+      <div class="phase">
+        <div class="ph-title">Phase 4 — Hardening</div>
+        <p>Vault-backed key storage, full audit logging, download tokens with MFA re-assertion, webhook integrations for downstream consumers.</p>
+      </div>
+      <div class="phase">
+        <div class="ph-title">Phase 5 — Scale &amp; resilience</div>
+        <p>Leader-locked worker replicas, multi-team/multi-tenant scoping, CT-log cross-checking, disaster recovery drills for the cert store.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="risks">
+    <h2><span class="section-num">13</span> Risks &amp; mitigations</h2>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th>Severity</th><th class="wrap">Risk</th><th class="wrap">Mitigation</th></tr></thead>
+        <tbody>
+          <tr><td><span class="risk-sev high"></span>High</td><td class="wrap">Private key leaked via API or UI</td><td class="wrap">Keys never leave Vault unencrypted; download requires MFA + short-lived token; every export audited</td></tr>
+          <tr><td><span class="risk-sev high"></span>High</td><td class="wrap">Renewal worker down during a renewal window</td><td class="wrap">Two replicas with leader lock; alert if no successful scan in 24h</td></tr>
+          <tr><td><span class="risk-sev med"></span>Medium</td><td class="wrap">Let's Encrypt rate limits hit during retries</td><td class="wrap">Track issuance attempts per domain; backoff before resubmitting</td></tr>
+          <tr><td><span class="risk-sev med"></span>Medium</td><td class="wrap">DNS provider API access needed for DNS-01 is broad in scope</td><td class="wrap">Scope credentials to TXT record management on the specific zone only</td></tr>
+          <tr><td><span class="risk-sev low"></span>Low</td><td class="wrap">ZeroSSL API contract changes</td><td class="wrap">CertificateAuthority interface isolates the integration to one module</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    SSL Sentry — planning document. Prepared for review; scope and phasing subject to change as implementation begins.
+  </footer>
+</main>
+</div>
+</body>
+</html>
