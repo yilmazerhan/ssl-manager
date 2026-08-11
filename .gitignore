@@ -8,3 +8,4 @@ frontend/dist/
 .env.local
 
 .DS_Store
+frontend/tsconfig.tsbuildinfo
