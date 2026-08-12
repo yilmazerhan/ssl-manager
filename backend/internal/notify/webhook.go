@@ -22,7 +22,14 @@ func NewWebhookSender(url string) *WebhookSender {
 }
 
 func (w *WebhookSender) Send(ctx context.Context, e Event) error {
-	body, err := json.Marshal(map[string]string{"text": formatMessage(e)})
+	text := e.Body
+	if text == "" {
+		text = formatMessage(e)
+	}
+	if e.Subject != "" {
+		text = e.Subject + "\n" + text
+	}
+	body, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
 		return fmt.Errorf("notify: marshal webhook payload: %w", err)
 	}

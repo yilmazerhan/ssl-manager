@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { api, AuditEntry, Certificate, CertificateVersion, downloadPEM } from "../api/client";
+import { api, AuditEntry, Certificate, CertificateVersion, NotificationLogEntry, downloadPEM } from "../api/client";
 import StatusPill from "../components/StatusPill";
 import { useAuth } from "../auth/AuthContext";
 
@@ -10,22 +10,45 @@ export default function CertificateDetail() {
   const [cert, setCert] = useState<Certificate | null>(null);
   const [history, setHistory] = useState<CertificateVersion[]>([]);
   const [auditLog, setAuditLog] = useState<AuditEntry[]>([]);
+  const [notifyLog, setNotifyLog] = useState<NotificationLogEntry[]>([]);
+  const [notifyEmailsInput, setNotifyEmailsInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   function load() {
     if (!id) return;
-    Promise.all([api.getCertificate(id), api.getHistory(id), api.getAudit(id)])
-      .then(([c, h, a]) => {
+    Promise.all([api.getCertificate(id), api.getHistory(id), api.getAudit(id), api.getCertificateNotifications(id)])
+      .then(([c, h, a, n]) => {
         setCert(c);
         setHistory(h);
         setAuditLog(a ?? []);
+        setNotifyLog(n ?? []);
+        setNotifyEmailsInput((c.notify_emails ?? []).join(", "));
       })
       .catch((e) => setError(e.message));
   }
 
   useEffect(load, [id]);
+
+  async function handleSaveNotifyEmails() {
+    if (!id) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const emails = notifyEmailsInput
+        .split(",")
+        .map((e) => e.trim())
+        .filter(Boolean);
+      await api.updateNotifyEmails(id, emails);
+      setNotice("Notification recipients updated.");
+      load();
+    } catch (e) {
+      setNotice((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function handleDownload() {
     if (!id || !cert) return;
@@ -125,6 +148,26 @@ export default function CertificateDetail() {
         </div>
       </div>
 
+      {hasScope("certs:issue") && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Expiry notification recipients</h3>
+          <p style={{ fontSize: 13, color: "var(--muted)" }}>
+            Overrides the default recipients in notification settings for this certificate only. Leave empty to use the defaults.
+          </p>
+          <div className="field">
+            <label>Recipients (comma-separated)</label>
+            <input
+              value={notifyEmailsInput}
+              onChange={(e) => setNotifyEmailsInput(e.target.value)}
+              placeholder="team@example.com"
+            />
+          </div>
+          <button className="secondary" disabled={busy} onClick={handleSaveNotifyEmails}>
+            Save
+          </button>
+        </div>
+      )}
+
       <h3>Version history</h3>
       <table>
         <thead>
@@ -142,6 +185,35 @@ export default function CertificateDetail() {
               <td>{v.fingerprint_sha256.slice(0, 16)}…</td>
             </tr>
           ))}
+        </tbody>
+      </table>
+
+      <h3>Notification history</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Sent</th>
+            <th>Threshold</th>
+            <th>Status</th>
+            <th>Recipients</th>
+          </tr>
+        </thead>
+        <tbody>
+          {notifyLog.map((n) => (
+            <tr key={n.id}>
+              <td>{new Date(n.sent_at).toLocaleString()}</td>
+              <td>{n.threshold_days}d</td>
+              <td>
+                <StatusPill status={n.status} />
+              </td>
+              <td>{n.recipients.join(", ") || "—"}</td>
+            </tr>
+          ))}
+          {notifyLog.length === 0 && (
+            <tr>
+              <td colSpan={4}>No reminders sent yet.</td>
+            </tr>
+          )}
         </tbody>
       </table>
 

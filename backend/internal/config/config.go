@@ -14,6 +14,14 @@ import (
 	"time"
 )
 
+// InsecureDefaultSessionSecret is what SessionSecret falls back to when
+// SESSION_SECRET isn't set — convenient for `go run ./cmd/api` against a
+// local dev stack, and a real vulnerability anywhere it's reachable: it's
+// public, checked into this repo's source, and would let anyone forge a
+// valid admin session JWT offline. cmd/api/main.go refuses to start on
+// this value unless DevAuthEnabled is also true.
+const InsecureDefaultSessionSecret = "insecure-dev-secret-change-me"
+
 type Config struct {
 	Addr string
 
@@ -35,6 +43,21 @@ type Config struct {
 
 	ZeroSSLAPIKey  string
 	ZeroSSLBaseURL string
+
+	// SelfSignedValidity is how long a selfsigned-provider certificate is
+	// valid for. It's always available — there's no external account to
+	// configure — unlike every other provider here.
+	SelfSignedValidity time.Duration
+
+	// ADCS* configure the Active Directory Certificate Services provider.
+	// Leaving ADCSBaseURL empty disables it — there's no sensible default
+	// certsrv URL to fall back to.
+	ADCSBaseURL            string
+	ADCSTemplate           string
+	ADCSUsername           string
+	ADCSPassword           string
+	ADCSAllowBasicAuth     bool
+	ADCSInsecureSkipVerify bool
 
 	SessionSecret string
 	SessionTTL    time.Duration
@@ -82,7 +105,16 @@ func Load() Config {
 		ZeroSSLAPIKey:  getEnv("ZEROSSL_API_KEY", ""),
 		ZeroSSLBaseURL: getEnv("ZEROSSL_BASE_URL", "https://api.zerossl.com"),
 
-		SessionSecret: getEnv("SESSION_SECRET", "insecure-dev-secret-change-me"),
+		SelfSignedValidity: getDuration("SELFSIGNED_VALIDITY", 365*24*time.Hour),
+
+		ADCSBaseURL:            getEnv("ADCS_BASE_URL", ""),
+		ADCSTemplate:           getEnv("ADCS_TEMPLATE", ""),
+		ADCSUsername:           getEnv("ADCS_USERNAME", ""),
+		ADCSPassword:           getEnv("ADCS_PASSWORD", ""),
+		ADCSAllowBasicAuth:     getBool("ADCS_ALLOW_BASIC_AUTH", false),
+		ADCSInsecureSkipVerify: getBool("ADCS_INSECURE_SKIP_VERIFY", false),
+
+		SessionSecret: getEnv("SESSION_SECRET", InsecureDefaultSessionSecret),
 		SessionTTL:    getDuration("SESSION_TTL", 12*time.Hour),
 
 		OIDCIssuerURL:    getEnv("OIDC_ISSUER_URL", ""),

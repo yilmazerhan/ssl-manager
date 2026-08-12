@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ssl_manager
       POSTGRES_PASSWORD: ssl_manager_dev
@@ -15,8 +16,18 @@ services:
       timeout: 5s
       retries: 10
 
+  # NOTE: this runs Vault in `-dev` mode — in-memory, unsealed
+  # automatically, no persistent storage backend. That's fine for local
+  # development but means every Transit key (i.e. every certificate's
+  # private key material) and every stored secret is permanently lost the
+  # moment this container restarts, is recreated, or the host reboots.
+  # Before relying on this for a server that holds real certificates,
+  # switch Vault to a real storage backend (file or raft) with proper
+  # unseal-key handling — restart: unless-stopped below only keeps the
+  # container itself running, it does nothing to protect what's inside it.
   vault:
     image: hashicorp/vault:1.17
+    restart: unless-stopped
     cap_add:
       - IPC_LOCK
     environment:
@@ -43,6 +54,7 @@ services:
 
   backend:
     build: ./backend
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -77,6 +89,7 @@ services:
 
   frontend:
     build: ./frontend
+    restart: unless-stopped
     depends_on:
       - backend
     ports:

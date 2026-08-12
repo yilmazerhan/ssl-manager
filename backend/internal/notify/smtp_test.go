@@ -101,3 +101,35 @@ func TestSMTPSender_Send(t *testing.T) {
 		t.Fatal("timed out waiting for the mock server to receive DATA")
 	}
 }
+
+// TestSMTPSender_Send_SanitizesHeaderInjection proves a recipient or
+// subject carrying "\r\nBcc: attacker@evil.com" — both ultimately traced
+// back to user-supplied data (a certificate's notify_emails override, or a
+// domain name rendered into the subject template) — can't inject an extra
+// header into the raw message this sender builds.
+func TestSMTPSender_Send_SanitizesHeaderInjection(t *testing.T) {
+	addr, received := mockSMTPServer(t)
+
+	sender := &SMTPSender{Addr: addr, From: "ssl-sentry@example.com"}
+
+	if err := sender.Send(context.Background(), Event{
+		Kind:       KindExpiryReminder,
+		CommonName: "app.example.com",
+		Subject:    "expiring soon\r\nBcc: attacker@evil.com",
+		Body:       "reminder body",
+		Recipients: []string{"victim@example.com\r\nBcc: attacker@evil.com"},
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	select {
+	case data := <-received:
+		for _, line := range strings.Split(data, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "Bcc:") {
+				t.Fatalf("expected no injected Bcc header, got line %q in message:\n%s", line, data)
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the mock server to receive DATA")
+	}
+}

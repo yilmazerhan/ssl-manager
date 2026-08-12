@@ -11,6 +11,10 @@ import (
 type ConsoleSender struct{}
 
 func (ConsoleSender) Send(_ context.Context, e Event) error {
+	if e.Subject != "" || len(e.Recipients) > 0 {
+		log.Printf("[notify] %s cert=%s to=%v subject=%q: %s", e.Kind, e.CertificateID, e.Recipients, e.Subject, e.Body)
+		return nil
+	}
 	log.Printf("[notify] %s cert=%s (%s) team=%s days_remaining=%d: %s",
 		e.Kind, e.CommonName, e.CertificateID, e.OwningTeam, e.DaysRemaining, e.Message)
 	return nil

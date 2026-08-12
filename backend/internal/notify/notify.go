@@ -24,6 +24,17 @@ type Event struct {
 	OwningTeam    string
 	DaysRemaining int
 	Message       string
+	// Subject and Body, when set, override each Sender's own default
+	// formatting — the templated expiry-reminder path renders these from
+	// notification_settings rather than the fixed per-Kind message every
+	// other event still uses.
+	Subject string
+	Body    string
+	// Recipients, when set, overrides SMTPSender's own static To list —
+	// each certificate's distribution list can differ, unlike the
+	// renewal-succeeded/failed events every channel is configured for
+	// uniformly.
+	Recipients []string
 }
 
 type Sender interface {

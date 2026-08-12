@@ -7,6 +7,20 @@ const TONE: Record<string, string> = {
   expired: "critical",
   revoked: "critical",
   failed: "critical",
+  // discovery scan statuses
+  pending: "warn",
+  running: "warn",
+  completed: "ok",
+  partially_completed: "warn",
+  canceled: "critical",
+  // notification log statuses
+  sent: "ok",
+  // discovery result match statuses
+  matched: "ok",
+  mismatched: "warn",
+  not_in_inventory: "warn",
+  no_tls: "accent",
+  unreachable: "critical",
 };
 
 export default function StatusPill({ status }: { status: string }) {

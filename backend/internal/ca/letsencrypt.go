@@ -242,7 +242,7 @@ func (l *LetsEncrypt) CheckChallenge(_ context.Context, po ProviderOrder) (Provi
 	return po, nil
 }
 
-func (l *LetsEncrypt) Issue(_ context.Context, po ProviderOrder, csrPEM string, domains []string) (IssuedCertificate, error) {
+func (l *LetsEncrypt) Issue(_ context.Context, po ProviderOrder, csrPEM string, domains []string, _ crypto.Signer) (IssuedCertificate, error) {
 	var state leState
 	if err := json.Unmarshal([]byte(po.State), &state); err != nil {
 		return IssuedCertificate{}, fmt.Errorf("letsencrypt: unmarshal state: %w", err)

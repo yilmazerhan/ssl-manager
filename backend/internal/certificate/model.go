@@ -26,12 +26,15 @@ type Certificate struct {
 	// certificate at the CA again (e.g. ZeroSSL's certificate ID); empty
 	// for providers that don't need one (Let's Encrypt) or for
 	// manually-uploaded certificates.
-	CAReference     string    `json:"-"`
-	OwningTeam      string    `json:"owning_team"`
-	AutoRenew       bool      `json:"auto_renew"`
-	RenewBeforeDays int       `json:"renew_before_days"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	CAReference     string `json:"-"`
+	OwningTeam      string `json:"owning_team"`
+	AutoRenew       bool   `json:"auto_renew"`
+	RenewBeforeDays int    `json:"renew_before_days"`
+	// NotifyEmails overrides notification_settings.default_recipients for
+	// this certificate's expiry reminders when non-empty.
+	NotifyEmails []string  `json:"notify_emails,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // Version is an immutable record of one issuance. The private key is never

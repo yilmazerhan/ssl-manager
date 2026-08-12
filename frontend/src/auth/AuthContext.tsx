@@ -7,6 +7,7 @@ export interface Identity {
   email: string;
   role: Role;
   team: string;
+  mustChangePassword: boolean;
 }
 
 const ROLE_SCOPES: Record<Role, string[]> = {
@@ -31,7 +32,13 @@ const STORAGE_KEY = "ssl-sentry.token";
 function decodeIdentity(token: string): Identity | null {
   try {
     const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
-    return { userId: payload.sub, email: payload.email, role: payload.role, team: payload.team ?? "" };
+    return {
+      userId: payload.sub,
+      email: payload.email,
+      role: payload.role,
+      team: payload.team ?? "",
+      mustChangePassword: payload.must_change_password ?? false,
+    };
   } catch {
     return null;
   }
