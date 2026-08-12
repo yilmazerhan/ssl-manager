@@ -21,6 +21,10 @@ func (h *handlers) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (h *handlers) getIntegrations(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, h.deps.Integrations)
+}
+
 func (h *handlers) listCertificates(w http.ResponseWriter, r *http.Request) {
 	identity, _ := auth.IdentityFromContext(r.Context())
 

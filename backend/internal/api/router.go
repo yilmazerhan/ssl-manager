@@ -29,6 +29,28 @@ type Dependencies struct {
 	OIDC           *auth.OIDCHandler // nil if OIDC isn't configured
 	DevAuthEnabled bool
 	Authorities    map[string]ca.Authority
+	Integrations   IntegrationsStatus
+}
+
+// IntegrationsStatus is a point-in-time snapshot of how the CA/DNS
+// integrations are configured, computed once at startup (see cmd/api) —
+// it answers "is this connected", the admin-facing question from
+// docs/plan.html section 08, without exposing the credentials themselves.
+type IntegrationsStatus struct {
+	LetsEncrypt struct {
+		Environment       string `json:"environment"`
+		DirectoryURL      string `json:"directory_url"`
+		ContactEmail      string `json:"contact_email"`
+		AccountRegistered bool   `json:"account_registered"`
+	} `json:"letsencrypt"`
+	ZeroSSL struct {
+		Configured bool   `json:"configured"`
+		BaseURL    string `json:"base_url"`
+	} `json:"zerossl"`
+	DNS01 struct {
+		Provider   string `json:"provider"`
+		Configured bool   `json:"configured"`
+	} `json:"dns01"`
 }
 
 func NewRouter(deps Dependencies) http.Handler {
@@ -59,6 +81,8 @@ func NewRouter(deps Dependencies) http.Handler {
 	mux.Handle("POST /api/v1/certificate-orders", authed(auth.RequireScope(auth.ScopeCertsIssue)(http.HandlerFunc(h.createOrder))))
 	mux.Handle("GET /api/v1/certificate-orders/{id}", authed(auth.RequireScope(auth.ScopeCertsRead)(http.HandlerFunc(h.getOrder))))
 	mux.Handle("POST /api/v1/certificate-orders/{id}/validate", authed(auth.RequireScope(auth.ScopeCertsIssue)(http.HandlerFunc(h.validateOrder))))
+
+	mux.Handle("GET /api/v1/integrations", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.getIntegrations))))
 
 	mux.Handle("GET /api/v1/users", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.listUsers))))
 	mux.Handle("POST /api/v1/users/{id}/role", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.setUserRole))))

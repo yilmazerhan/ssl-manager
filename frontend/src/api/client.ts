@@ -76,6 +76,30 @@ export interface AppUser {
   created_at: string;
 }
 
+export interface CertificateFilter {
+  team?: string;
+  status?: string;
+  ca_provider?: string;
+  expiring_within_days?: number;
+}
+
+export interface IntegrationsStatus {
+  letsencrypt: {
+    environment: string;
+    directory_url: string;
+    contact_email: string;
+    account_registered: boolean;
+  };
+  zerossl: {
+    configured: boolean;
+    base_url: string;
+  };
+  dns01: {
+    provider: string;
+    configured: boolean;
+  };
+}
+
 const TOKEN_KEY = "ssl-sentry.token";
 
 class ApiError extends Error {}
@@ -100,8 +124,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+function toQuery(params: Record<string, string | number | undefined>): string {
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === "") continue;
+    parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+  }
+  return parts.length ? `?${parts.join("&")}` : "";
+}
+
 export const api = {
-  listCertificates: () => request<Certificate[]>("/certificates"),
+  listCertificates: (filter: CertificateFilter = {}) =>
+    request<Certificate[]>(
+      `/certificates${toQuery({
+        team: filter.team,
+        status: filter.status,
+        ca_provider: filter.ca_provider,
+        expiring_within_days: filter.expiring_within_days,
+      })}`
+    ),
   getCertificate: (id: string) => request<Certificate>(`/certificates/${id}`),
   getHistory: (id: string) => request<CertificateVersion[]>(`/certificates/${id}/history`),
   getAudit: (id: string) => request<AuditEntry[]>(`/certificates/${id}/audit`),
@@ -123,6 +164,8 @@ export const api = {
     request<{ status: string }>(`/users/${id}/role`, { method: "POST", body: JSON.stringify({ role, team }) }),
   createAPIKey: (id: string, name: string, scopes: string[]) =>
     request<{ key: string }>(`/users/${id}/api-keys`, { method: "POST", body: JSON.stringify({ name, scopes }) }),
+
+  getIntegrations: () => request<IntegrationsStatus>("/integrations"),
 
   devLogin: (email: string, role: string, team: string) =>
     fetch("/auth/dev-login", {

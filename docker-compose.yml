@@ -60,6 +60,8 @@ services:
       LETSENCRYPT_ENVIRONMENT: "staging"
       LETSENCRYPT_EMAIL: "${LETSENCRYPT_EMAIL:-admin@example.com}"
       ZEROSSL_API_KEY: "${ZEROSSL_API_KEY:-}"
+      DNS01_PROVIDER: "${DNS01_PROVIDER:-}"
+      CLOUDFLARE_DNS_API_TOKEN: "${CLOUDFLARE_DNS_API_TOKEN:-}"
       SESSION_SECRET: "${SESSION_SECRET:-change-me-in-any-real-deployment}"
       DEV_AUTH_ENABLED: "${DEV_AUTH_ENABLED:-true}"
       OIDC_ISSUER_URL: "${OIDC_ISSUER_URL:-}"

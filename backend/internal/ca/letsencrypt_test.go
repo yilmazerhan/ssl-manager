@@ -50,7 +50,7 @@ func TestLetsEncrypt_FullFlow_HTTP01(t *testing.T) {
 		DirectoryURL:       directoryURL,
 		ContactEmail:       "test@example.test",
 		InsecureSkipVerify: true,
-	}, &fakeSecretStore{data: map[string]map[string]interface{}{}}, &fakeCAAccountStore{})
+	}, &fakeSecretStore{data: map[string]map[string]interface{}{}}, &fakeCAAccountStore{}, nil)
 	if err != nil {
 		t.Fatalf("NewLetsEncrypt: %v", err)
 	}

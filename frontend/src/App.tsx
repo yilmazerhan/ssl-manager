@@ -4,6 +4,8 @@ import Inventory from "./pages/Inventory";
 import CertificateDetail from "./pages/CertificateDetail";
 import NewCertificateWizard from "./pages/NewCertificateWizard";
 import Login from "./pages/Login";
+import Integrations from "./pages/Integrations";
+import AdminUsers from "./pages/AdminUsers";
 import { useAuth } from "./auth/AuthContext";
 
 export default function App() {
@@ -12,6 +14,8 @@ export default function App() {
   if (!identity) {
     return <Login />;
   }
+
+  const isAdmin = identity.role === "admin";
 
   return (
     <div className="app-shell">
@@ -23,6 +27,8 @@ export default function App() {
           </NavLink>
           <NavLink to="/inventory">Inventory</NavLink>
           {identity.role !== "viewer" && <NavLink to="/certificates/new">New certificate</NavLink>}
+          {isAdmin && <NavLink to="/admin/integrations">Integrations</NavLink>}
+          {isAdmin && <NavLink to="/admin/users">Users</NavLink>}
         </nav>
         <div style={{ marginTop: "auto", paddingTop: 24, fontSize: 12.5, color: "var(--muted)" }}>
           <div>{identity.email}</div>
@@ -41,6 +47,8 @@ export default function App() {
           <Route path="/inventory" element={<Inventory />} />
           <Route path="/certificates/new" element={<NewCertificateWizard />} />
           <Route path="/certificates/:id" element={<CertificateDetail />} />
+          {isAdmin && <Route path="/admin/integrations" element={<Integrations />} />}
+          {isAdmin && <Route path="/admin/users" element={<AdminUsers />} />}
         </Routes>
       </main>
     </div>

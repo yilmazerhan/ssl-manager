@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -38,6 +39,7 @@ type LetsEncryptConfig struct {
 type LetsEncrypt struct {
 	core *api.Core
 	cfg  LetsEncryptConfig
+	dns  *DNSAutomation
 }
 
 // NewLetsEncrypt loads (or, on first use, generates and registers) the ACME
@@ -46,7 +48,10 @@ type LetsEncrypt struct {
 // Transit-backed, never-exported kind used for customer certificates,
 // because ACME account keys sign frequent local JWS requests rather than
 // occasional remote CSR signatures.
-func NewLetsEncrypt(ctx context.Context, cfg LetsEncryptConfig, secretStore secrets.SecretStore, accounts caaccount.Store) (*LetsEncrypt, error) {
+//
+// dnsAutomation may be nil — DNS-01 then falls back to manual
+// instructions, same as HTTP-01.
+func NewLetsEncrypt(ctx context.Context, cfg LetsEncryptConfig, secretStore secrets.SecretStore, accounts caaccount.Store, dnsAutomation *DNSAutomation) (*LetsEncrypt, error) {
 	accountKey, err := loadOrCreateAccountKey(ctx, secretStore, cfg.Environment)
 	if err != nil {
 		return nil, fmt.Errorf("letsencrypt[%s]: account key: %w", cfg.Environment, err)
@@ -91,7 +96,7 @@ func NewLetsEncrypt(ctx context.Context, cfg LetsEncryptConfig, secretStore secr
 		}
 	}
 
-	return &LetsEncrypt{core: core, cfg: cfg}, nil
+	return &LetsEncrypt{core: core, cfg: cfg, dns: dnsAutomation}, nil
 }
 
 func (l *LetsEncrypt) Name() string { return "letsencrypt" }
@@ -106,6 +111,8 @@ type leAuthzState struct {
 	ChallengeURL string `json:"challenge_url"`
 	Token        string `json:"token"`
 	Triggered    bool   `json:"triggered"`
+	Automated    bool   `json:"automated"`
+	CleanedUp    bool   `json:"cleaned_up"`
 }
 
 type leState struct {
@@ -146,6 +153,7 @@ func (l *LetsEncrypt) RequestValidation(ctx context.Context, domains []string, m
 
 		domain := authz.Identifier.Value
 		var resourceName, value string
+		automated := false
 		switch method {
 		case "http-01":
 			resourceName = fmt.Sprintf("http://%s/.well-known/acme-challenge/%s", domain, acmeChallenge.Token)
@@ -153,6 +161,12 @@ func (l *LetsEncrypt) RequestValidation(ctx context.Context, domains []string, m
 		case "dns-01":
 			fqdn, val := dns01.GetRecord(domain, keyAuth)
 			resourceName, value = fqdn, val
+			if l.dns != nil {
+				if err := l.dns.Present(domain, acmeChallenge.Token, keyAuth); err != nil {
+					return ProviderOrder{}, fmt.Errorf("letsencrypt: automate DNS-01 for %s: %w", domain, err)
+				}
+				automated = true
+			}
 		}
 
 		challenges = append(challenges, Challenge{
@@ -160,12 +174,14 @@ func (l *LetsEncrypt) RequestValidation(ctx context.Context, domains []string, m
 			Type:         method,
 			ResourceName: resourceName,
 			Value:        value,
+			Automated:    automated,
 		})
 		state.Authz = append(state.Authz, leAuthzState{
 			Domain:       domain,
 			AuthzURL:     authzURL,
 			ChallengeURL: acmeChallenge.URL,
 			Token:        acmeChallenge.Token,
+			Automated:    automated,
 		})
 	}
 
@@ -203,6 +219,15 @@ func (l *LetsEncrypt) CheckChallenge(_ context.Context, po ProviderOrder) (Provi
 		switch authz.Status {
 		case "valid":
 			po.Challenges[i].Verified = true
+			if as.Automated && !as.CleanedUp && l.dns != nil {
+				keyAuth, err := l.core.GetKeyAuthorization(as.Token)
+				if err == nil {
+					if err := l.dns.CleanUp(as.Domain, as.Token, keyAuth); err != nil {
+						log.Printf("letsencrypt: cleanup DNS-01 record for %s: %v", as.Domain, err)
+					}
+				}
+				as.CleanedUp = true
+			}
 		case "invalid":
 			po.Challenges[i].Error = challengeError(authz.Challenges)
 		}

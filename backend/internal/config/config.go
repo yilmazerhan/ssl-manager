@@ -28,6 +28,10 @@ type Config struct {
 	LetsEncryptEnvironment        string
 	LetsEncryptEmail              string
 	LetsEncryptInsecureSkipVerify bool
+	// DNS01Provider names a real DNS provider (currently "cloudflare") to
+	// automate DNS-01 TXT records; empty means DNS-01 falls back to manual
+	// instructions, same as HTTP-01.
+	DNS01Provider string
 
 	ZeroSSLAPIKey  string
 	ZeroSSLBaseURL string
@@ -73,6 +77,7 @@ func Load() Config {
 		LetsEncryptEnvironment:        getEnv("LETSENCRYPT_ENVIRONMENT", "staging"),
 		LetsEncryptEmail:              getEnv("LETSENCRYPT_EMAIL", "admin@example.com"),
 		LetsEncryptInsecureSkipVerify: getBool("LETSENCRYPT_INSECURE_SKIP_VERIFY", false),
+		DNS01Provider:                 getEnv("DNS01_PROVIDER", ""),
 
 		ZeroSSLAPIKey:  getEnv("ZEROSSL_API_KEY", ""),
 		ZeroSSLBaseURL: getEnv("ZEROSSL_BASE_URL", "https://api.zerossl.com"),

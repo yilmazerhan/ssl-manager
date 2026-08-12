@@ -39,6 +39,22 @@ func testService(t *testing.T) (*Service, string) {
 	if err := pool.QueryRow(ctx, `INSERT INTO app_user (email, role) VALUES ($1, 'cert_manager') RETURNING id`, email).Scan(&userID); err != nil {
 		t.Fatalf("create test user: %v", err)
 	}
+	// Runs before pool.Close (t.Cleanup is LIFO): this is a real, possibly
+	// shared Postgres instance, and a stray auto_renew=true certificate
+	// left behind would have the live renewal engine trying (and failing)
+	// to renew a fake certificate forever.
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM certificate_order WHERE requested_by = $1`, userID); err != nil {
+			t.Logf("cleanup: delete certificate_order rows: %v", err)
+		}
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM certificate WHERE owning_team = 'platform-test'`); err != nil {
+			t.Logf("cleanup: delete certificate rows: %v", err)
+		}
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM app_user WHERE id = $1`, userID); err != nil {
+			t.Logf("cleanup: delete test user: %v", err)
+		}
+	})
 
 	certs := certificate.NewPostgresStore(pool)
 	orders := NewPostgresStore(pool)

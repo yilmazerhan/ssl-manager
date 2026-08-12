@@ -24,6 +24,11 @@ type Challenge struct {
 	Value        string `json:"value"`
 	Verified     bool   `json:"verified"`
 	Error        string `json:"error,omitempty"`
+	// Automated is true when a real DNS provider published this record —
+	// there is nothing for a human to do, unlike a manual HTTP-01/DNS-01
+	// challenge, which still needs someone to publish ResourceName/Value
+	// themselves.
+	Automated bool `json:"automated,omitempty"`
 }
 
 // ProviderOrder is what a CA implementation returns from RequestValidation

@@ -26,6 +26,16 @@ The full architecture and delivery plan is in [`docs/plan.html`](docs/plan.html)
   against [Pebble](https://github.com/letsencrypt/pebble), the ACME v2 test
   server Let's Encrypt itself uses — see
   `backend/internal/ca/letsencrypt_test.go`.
+- **Automated DNS-01** (`backend/internal/ca/dns.go`) — when `DNS01_PROVIDER`
+  is set (currently `cloudflare`), the TXT record is published through the
+  provider's real API and this process waits for its own DNS lookups to
+  see it before telling the CA to check — no human ever sees a "please
+  publish this record" instruction. Leaving `DNS01_PROVIDER` unset falls
+  back to manual instructions, same as HTTP-01. Integration-tested
+  end-to-end against Pebble with Present/CleanUp driven through
+  `pebble-challtestsrv`'s real management API (see
+  `backend/internal/ca/dns_test.go`) — the automation path itself is
+  proven, independent of which concrete provider is configured.
 - **Real ZeroSSL client** (`backend/internal/ca/zerossl.go`) — implements
   their documented CSR-upload + trigger-validation + poll + download REST
   flow. Unit-tested against a mock server reproducing their documented
@@ -66,13 +76,9 @@ leaves it").
 
 ## What's not implemented
 
-- **DNS-01 automation.** The Let's Encrypt client supports DNS-01, but no
-  DNS provider (Cloudflare, Route 53, ...) is wired up to publish the TXT
-  record automatically — today it's a "here's the record, publish it
-  yourself" instruction, same as manual HTTP-01. Automated DNS-01 is what
-  makes unattended renewal work for domains you don't personally control
-  the origin server for; wiring a real provider via `lego`'s
-  `challenge/dns01` providers is the natural next step.
+- **DNS-01 automation only covers Cloudflare.** Adding another provider
+  (Route 53, etc.) is a few lines in `ca.NewDNSAutomation` — `lego` ships
+  providers for most registrars — but only Cloudflare is wired up today.
 - **Live ZeroSSL verification** — see above.
 - **Live OIDC verification** — the login flow is a standard, real
   implementation, but this environment has no OIDC tenant to test it
@@ -129,17 +135,34 @@ configure `OIDC_ISSUER_URL`/`OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET` instead.
 
 ### Testing against a real ACME v2 exchange without a real CA
 
-The Let's Encrypt integration test drives the actual protocol against
+The Let's Encrypt integration tests drive the actual protocol against
 [Pebble](https://github.com/letsencrypt/pebble):
 
 ```bash
 go install github.com/letsencrypt/pebble/v2/cmd/pebble@latest
-pebble -config test/config/pebble-config.json   # from the pebble repo, or see letsencrypt_test.go
+go install github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@latest
+
+# challtestsrv provides a mock DNS server for the DNS-01 test below, and
+# needs its own AAAA answers turned off — this sandbox (and some CI
+# runners) has no IPv6 loopback, and Pebble tries AAAA first otherwise.
+pebble-challtestsrv -http01 "" -https01 "" -tlsalpn01 "" -doh "" -defaultIPv6 ""
+
+# Point Pebble's own validation at that mock DNS server so DNS-01 lookups
+# resolve without touching the real internet.
+pebble -config test/config/pebble-config.json -dnsserver 127.0.0.1:8053
 
 ACME_TEST_DIRECTORY_URL="https://127.0.0.1:14000/dir" \
 VAULT_ADDR="http://127.0.0.1:8200" VAULT_TOKEN="dev-root-token" \
-go test ./internal/ca/... -run TestLetsEncrypt_FullFlow_HTTP01 -v
+CHALLTESTSRV_MANAGEMENT_URL="http://127.0.0.1:8055" \
+CHALLTESTSRV_DNS_ADDR="127.0.0.1:8053" \
+go test ./internal/ca/... -run TestLetsEncrypt_FullFlow -v
 ```
+
+`TestLetsEncrypt_FullFlow_HTTP01` hosts the challenge response itself (it's
+acting as "the customer's origin server"); `TestLetsEncrypt_FullFlow_DNS01_Automated`
+drives `DNSAutomation.Present`/`CleanUp` through `pebble-challtestsrv`'s
+real management API instead of Cloudflare's, so it proves the automation
+mechanism itself without needing a real DNS account.
 
 ### Configuration
 
@@ -148,3 +171,9 @@ see `backend/internal/config/config.go` for the full list (database and
 Vault connection, Let's Encrypt directory/environment/email, ZeroSSL API
 key, session secret, OIDC settings, SMTP/webhook notification settings,
 renewal interval).
+
+To automate DNS-01 with Cloudflare, set `DNS01_PROVIDER=cloudflare` plus
+whichever of `CLOUDFLARE_DNS_API_TOKEN` (recommended — scope it to
+Zone:Read + DNS:Edit) or `CLOUDFLARE_EMAIL`/`CLOUDFLARE_API_KEY` your
+account uses. Those are read directly by `lego`'s Cloudflare provider, not
+by this app's own config — see its docs for the full variable list.

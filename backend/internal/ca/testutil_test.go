@@ -1,14 +1,28 @@
 package ca
 
 import (
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"testing"
 	"time"
 )
+
+func mustBuildCSR(t *testing.T, signer crypto.Signer, domain string) string {
+	t.Helper()
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: domain},
+		DNSNames: []string{domain},
+	}, signer)
+	if err != nil {
+		t.Fatalf("CreateCertificateRequest: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
+}
 
 // testLeafCertPEM/testIssuerCertPEM are real, self-signed certificates
 // generated once at test-binary init, used wherever a test needs to feed a

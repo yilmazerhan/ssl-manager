@@ -57,17 +57,27 @@ func main() {
 	downloadTokens := downloadtoken.NewPostgresStore(pool)
 	auditStore := audit.NewPostgresStore(pool)
 
+	dnsAutomation, err := ca.NewDNSAutomation(cfg.DNS01Provider)
+	if err != nil {
+		log.Fatalf("initialize DNS-01 automation: %v", err)
+	}
+	if dnsAutomation == nil {
+		log.Println("DNS-01 automation is not configured (DNS01_PROVIDER unset) — DNS-01 falls back to manual instructions")
+	}
+
 	letsEncrypt, err := ca.NewLetsEncrypt(ctx, ca.LetsEncryptConfig{
 		Environment:        cfg.LetsEncryptEnvironment,
 		DirectoryURL:       cfg.LetsEncryptDirectoryURL,
 		ContactEmail:       cfg.LetsEncryptEmail,
 		InsecureSkipVerify: cfg.LetsEncryptInsecureSkipVerify,
-	}, secretStore, accounts)
+	}, secretStore, accounts, dnsAutomation)
 	if err != nil {
 		log.Fatalf("initialize Let's Encrypt client: %v", err)
 	}
 	zeroSSL := ca.NewZeroSSL(ca.ZeroSSLConfig{APIKey: cfg.ZeroSSLAPIKey, BaseURL: cfg.ZeroSSLBaseURL})
 	authorities := ca.Registry(letsEncrypt, zeroSSL)
+
+	integrationsStatus := buildIntegrationsStatus(ctx, cfg, accounts, dnsAutomation != nil)
 
 	orderService := order.NewService(orders, certs, keyManager, authorities)
 
@@ -112,6 +122,7 @@ func main() {
 		OIDC:           oidcHandler,
 		DevAuthEnabled: cfg.DevAuthEnabled,
 		Authorities:    authorities,
+		Integrations:   integrationsStatus,
 	})
 
 	server := &http.Server{Addr: cfg.Addr, Handler: router}
@@ -129,6 +140,30 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
+}
+
+// buildIntegrationsStatus is a one-time snapshot for the admin-facing
+// "is this connected" page (docs/plan.html section 08) — it never handles
+// a request itself, so a stale AccountRegistered flag after a mid-run
+// re-registration isn't a concern in practice (that only happens once,
+// at startup, before this snapshot is even taken).
+func buildIntegrationsStatus(ctx context.Context, cfg config.Config, accounts caaccount.Store, dnsConfigured bool) api.IntegrationsStatus {
+	var status api.IntegrationsStatus
+
+	status.LetsEncrypt.Environment = cfg.LetsEncryptEnvironment
+	status.LetsEncrypt.DirectoryURL = cfg.LetsEncryptDirectoryURL
+	status.LetsEncrypt.ContactEmail = cfg.LetsEncryptEmail
+	if account, err := accounts.Get(ctx, "letsencrypt", cfg.LetsEncryptEnvironment); err == nil {
+		status.LetsEncrypt.AccountRegistered = account.AccountRef != ""
+	}
+
+	status.ZeroSSL.Configured = cfg.ZeroSSLAPIKey != ""
+	status.ZeroSSL.BaseURL = cfg.ZeroSSLBaseURL
+
+	status.DNS01.Provider = cfg.DNS01Provider
+	status.DNS01.Configured = dnsConfigured
+
+	return status
 }
 
 func buildNotifier(cfg config.Config) notify.Sender {

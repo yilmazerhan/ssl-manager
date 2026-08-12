@@ -30,6 +30,19 @@ func testStore(t *testing.T) *PostgresStore {
 	return NewPostgresStore(pool)
 }
 
+// cleanupCertificate deletes a certificate this test created — these
+// tests run against a real, possibly shared, Postgres instance, and a
+// stray auto_renew=true row left behind would have the live renewal
+// engine trying (and failing) to renew a fake certificate forever.
+func cleanupCertificate(t *testing.T, store *PostgresStore, id string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if _, err := store.pool.Exec(context.Background(), `DELETE FROM certificate WHERE id = $1`, id); err != nil {
+			t.Logf("cleanup: delete certificate %s: %v", id, err)
+		}
+	})
+}
+
 func TestPostgresStore_CreateGetList(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
@@ -44,6 +57,7 @@ func TestPostgresStore_CreateGetList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	cleanupCertificate(t, store, created.ID)
 	if created.ID == "" {
 		t.Fatal("expected a generated ID")
 	}
@@ -95,6 +109,7 @@ func TestPostgresStore_UpdateAfterRenewalAndVersions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	cleanupCertificate(t, store, created.ID)
 
 	due, err := store.DueForRenewal(ctx, time.Now())
 	if err != nil {
