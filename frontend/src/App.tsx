@@ -10,6 +10,17 @@ import AdminUsers from "./pages/AdminUsers";
 import Discovery from "./pages/Discovery";
 import NotificationSettings from "./pages/NotificationSettings";
 import { useAuth } from "./auth/AuthContext";
+import {
+  ShieldCheckIcon,
+  GridIcon,
+  ListIcon,
+  PlusCircleIcon,
+  PlugIcon,
+  UsersIcon,
+  RadarIcon,
+  BellIcon,
+  LogoutIcon,
+} from "./components/Icons";
 
 export default function App() {
   const { identity, logout } = useAuth();
@@ -26,29 +37,68 @@ export default function App() {
   }
 
   const isAdmin = identity.role === "admin";
+  const initial = (identity.email || "?").trim().charAt(0).toUpperCase();
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand">SSL Sentry</div>
+        <div className="brand">
+          <span className="brand-mark">
+            <ShieldCheckIcon width={17} height={17} />
+          </span>
+          SSL Sentry
+        </div>
         <nav>
           <NavLink to="/" end>
+            <GridIcon />
             Dashboard
           </NavLink>
-          <NavLink to="/inventory">Inventory</NavLink>
-          {identity.role !== "viewer" && <NavLink to="/certificates/new">New certificate</NavLink>}
-          {isAdmin && <NavLink to="/admin/integrations">Integrations</NavLink>}
-          {isAdmin && <NavLink to="/admin/users">Users</NavLink>}
-          {isAdmin && <NavLink to="/admin/discovery">Discovery</NavLink>}
-          {isAdmin && <NavLink to="/admin/notifications">Notifications</NavLink>}
+          <NavLink to="/inventory">
+            <ListIcon />
+            Inventory
+          </NavLink>
+          {identity.role !== "viewer" && (
+            <NavLink to="/certificates/new">
+              <PlusCircleIcon />
+              New certificate
+            </NavLink>
+          )}
+
+          {isAdmin && (
+            <>
+              <div className="nav-section-label">Administration</div>
+              <NavLink to="/admin/integrations">
+                <PlugIcon />
+                Integrations
+              </NavLink>
+              <NavLink to="/admin/users">
+                <UsersIcon />
+                Users
+              </NavLink>
+              <NavLink to="/admin/discovery">
+                <RadarIcon />
+                Discovery
+              </NavLink>
+              <NavLink to="/admin/notifications">
+                <BellIcon />
+                Notifications
+              </NavLink>
+            </>
+          )}
         </nav>
-        <div style={{ marginTop: "auto", paddingTop: 24, fontSize: 12.5, color: "var(--muted)" }}>
-          <div>{identity.email}</div>
-          <div>
-            {identity.role}
-            {identity.team ? ` · ${identity.team}` : ""}
+        <div className="sidebar-footer">
+          <div className="user-chip">
+            <div className="avatar">{initial}</div>
+            <div className="user-meta">
+              <div className="user-email">{identity.email}</div>
+              <div className="user-role">
+                {identity.role.replace(/_/g, " ")}
+                {identity.team ? ` · ${identity.team}` : ""}
+              </div>
+            </div>
           </div>
-          <button className="secondary" style={{ marginTop: 10, width: "100%" }} onClick={logout}>
+          <button className="signout-btn" onClick={logout}>
+            <LogoutIcon width={15} height={15} />
             Sign out
           </button>
         </div>

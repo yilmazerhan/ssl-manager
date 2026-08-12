@@ -3,6 +3,17 @@ import { Link } from "react-router-dom";
 import { api, Certificate, DiscoveryResult, Stats } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import StatusPill from "../components/StatusPill";
+import {
+  GridIcon,
+  ShieldIcon,
+  ClockAlertIcon,
+  CalendarIcon,
+  XCircleIcon,
+  BanIcon,
+  AlertTriangleIcon,
+  RadarIcon,
+  BellIcon,
+} from "../components/Icons";
 
 function daysUntil(iso: string): number {
   return Math.ceil((new Date(iso).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
@@ -16,53 +27,85 @@ export default function Dashboard() {
   const [mismatches, setMismatches] = useState<DiscoveryResult[]>([]);
   const [notifications, setNotifications] = useState<{ sent: number; failed: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.listCertificates().then(setCerts).catch((e) => setError(e.message));
-    api
-      .getSummaryReport()
-      .then((r) => {
+    Promise.all([
+      api.listCertificates().then(setCerts),
+      api.getSummaryReport().then((r) => {
         setStats(r.certificates);
         if (r.discovery_mismatches !== undefined) setMismatches(r.discovery_mismatches ?? []);
         if (r.notifications_sent_30d !== undefined || r.notifications_failed_30d !== undefined) {
           setNotifications({ sent: r.notifications_sent_30d ?? 0, failed: r.notifications_failed_30d ?? 0 });
         }
-      })
-      .catch((e) => setError(e.message));
+      }),
+    ])
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
   }, []);
 
   const expiringSoon = certs.filter((c) => daysUntil(c.not_after) <= 30 && c.status !== "revoked");
 
   return (
     <>
-      <h1>Dashboard</h1>
-      <p className="page-lede">What's about to expire, how the inventory breaks down, and what discovery has found that doesn't match.</p>
+      <div className="page-header">
+        <div className="page-icon">
+          <GridIcon />
+        </div>
+        <div>
+          <h1>Dashboard</h1>
+          <p className="page-lede" style={{ margin: 0 }}>
+            What's about to expire, how the inventory breaks down, and what discovery has found that doesn't match.
+          </p>
+        </div>
+      </div>
+
       {error && <div className="card">Could not reach the API: {error}</div>}
+
+      {loading && !stats && <div className="card">Loading…</div>}
 
       {stats && (
         <div className="stat-grid">
-          <div className="stat-tile">
+          <div className="stat-tile accent">
+            <div className="stat-icon">
+              <ShieldIcon width={17} height={17} />
+            </div>
             <div className="stat-value">{stats.total}</div>
             <div className="stat-label">Total certificates</div>
           </div>
           <div className="stat-tile warn">
+            <div className="stat-icon">
+              <ClockAlertIcon width={17} height={17} />
+            </div>
             <div className="stat-value">{stats.expiring_in_7d}</div>
             <div className="stat-label">Expiring within 7 days</div>
           </div>
           <div className="stat-tile warn">
+            <div className="stat-icon">
+              <CalendarIcon width={17} height={17} />
+            </div>
             <div className="stat-value">{stats.expiring_in_30d}</div>
             <div className="stat-label">Expiring within 30 days</div>
           </div>
           <div className="stat-tile critical">
+            <div className="stat-icon">
+              <XCircleIcon width={17} height={17} />
+            </div>
             <div className="stat-value">{stats.by_status.expired ?? 0}</div>
             <div className="stat-label">Expired</div>
           </div>
           <div className="stat-tile critical">
+            <div className="stat-icon">
+              <BanIcon width={17} height={17} />
+            </div>
             <div className="stat-value">{stats.by_status.revoked ?? 0}</div>
             <div className="stat-label">Revoked</div>
           </div>
           {isAdmin && mismatches.length > 0 && (
             <div className="stat-tile warn">
+              <div className="stat-icon">
+                <AlertTriangleIcon width={17} height={17} />
+              </div>
               <div className="stat-value">{mismatches.length}</div>
               <div className="stat-label">Discovery mismatches</div>
             </div>
@@ -77,7 +120,10 @@ export default function Dashboard() {
             <div className="breakdown-list">
               {Object.entries(stats.by_ca_provider).map(([provider, count]) => (
                 <div className="breakdown-row" key={provider}>
-                  <span>{provider}</span>
+                  <span className="breakdown-label">
+                    <span className="swatch" />
+                    {provider}
+                  </span>
                   <span className="breakdown-count">{count}</span>
                 </div>
               ))}
@@ -89,7 +135,10 @@ export default function Dashboard() {
               <div className="breakdown-list">
                 {Object.entries(stats.by_team).map(([team, count]) => (
                   <div className="breakdown-row" key={team}>
-                    <span>{team}</span>
+                    <span className="breakdown-label">
+                      <span className="swatch" />
+                      {team}
+                    </span>
                     <span className="breakdown-count">{count}</span>
                   </div>
                 ))}
@@ -101,11 +150,17 @@ export default function Dashboard() {
               <h3 style={{ marginTop: 0, fontSize: 14 }}>Notifications (30d)</h3>
               <div className="breakdown-list">
                 <div className="breakdown-row">
-                  <span>Sent</span>
+                  <span className="breakdown-label">
+                    <BellIcon width={14} height={14} />
+                    Sent
+                  </span>
                   <span className="breakdown-count">{notifications.sent}</span>
                 </div>
                 <div className="breakdown-row">
-                  <span>Failed</span>
+                  <span className="breakdown-label">
+                    <AlertTriangleIcon width={14} height={14} />
+                    Failed
+                  </span>
                   <span className="breakdown-count">{notifications.failed}</span>
                 </div>
               </div>
@@ -114,12 +169,16 @@ export default function Dashboard() {
         </div>
       )}
 
-      <h3>Expiring within 30 days</h3>
+      <div className="section-heading">
+        <ClockAlertIcon width={16} height={16} />
+        <h3>Expiring within 30 days</h3>
+      </div>
       <table>
         <thead>
           <tr>
             <th>Domain</th>
             <th>Issuer</th>
+            <th>Status</th>
             <th>Expires</th>
             <th>Owning team</th>
           </tr>
@@ -131,13 +190,16 @@ export default function Dashboard() {
                 <Link to={`/certificates/${c.id}`}>{c.common_name}</Link>
               </td>
               <td>{c.ca_provider}</td>
+              <td>
+                <StatusPill status={c.status} />
+              </td>
               <td>{daysUntil(c.not_after)} days</td>
               <td>{c.owning_team}</td>
             </tr>
           ))}
-          {expiringSoon.length === 0 && (
+          {!loading && expiringSoon.length === 0 && (
             <tr>
-              <td colSpan={4}>Nothing expiring soon.</td>
+              <td colSpan={5}>Nothing expiring soon.</td>
             </tr>
           )}
         </tbody>
@@ -145,8 +207,13 @@ export default function Dashboard() {
 
       {isAdmin && mismatches.length > 0 && (
         <>
-          <h3>Discovery mismatches</h3>
-          <p className="page-lede">Endpoints found by network discovery that don't match, or aren't in, the certificate inventory.</p>
+          <div className="section-heading">
+            <RadarIcon width={16} height={16} />
+            <h3>Discovery mismatches</h3>
+          </div>
+          <p className="page-lede" style={{ marginTop: -4 }}>
+            Endpoints found by network discovery that don't match, or aren't in, the certificate inventory.
+          </p>
           <table>
             <thead>
               <tr>
