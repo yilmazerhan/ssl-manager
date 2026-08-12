@@ -88,7 +88,7 @@ func (s *PostgresStore) ListScans(ctx context.Context) ([]Scan, error) {
 	}
 	defer rows.Close()
 
-	var out []Scan
+	out := []Scan{}
 	for rows.Next() {
 		sc, err := scanScan(rows)
 		if err != nil {
@@ -126,7 +126,7 @@ func (s *PostgresStore) ListResults(ctx context.Context, scanID string) ([]Resul
 	}
 	defer rows.Close()
 
-	var out []Result
+	out := []Result{}
 	for rows.Next() {
 		r, err := scanResult(rows)
 		if err != nil {
@@ -154,7 +154,7 @@ func (s *PostgresStore) ListMismatches(ctx context.Context, limit int) ([]Result
 	}
 	defer rows.Close()
 
-	var out []Result
+	out := []Result{}
 	for rows.Next() {
 		r, err := scanResult(rows)
 		if err != nil {

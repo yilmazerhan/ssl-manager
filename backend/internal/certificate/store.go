@@ -108,7 +108,11 @@ func (s *PostgresStore) List(ctx context.Context, filter Filter) ([]Certificate,
 	}
 	defer rows.Close()
 
-	var out []Certificate
+	// Never a nil slice: this is serialized straight to JSON as the
+	// frontend's certificate list, which — on a freshly installed, still
+	// empty inventory — would otherwise encode as `null` instead of `[]`
+	// and crash the dashboard's `certs.filter(...)`.
+	out := []Certificate{}
 	for rows.Next() {
 		c, err := scanCertificate(rows)
 		if err != nil {
@@ -181,7 +185,7 @@ func (s *PostgresStore) DueForRenewal(ctx context.Context, asOf time.Time) ([]Ce
 	}
 	defer rows.Close()
 
-	var out []Certificate
+	out := []Certificate{}
 	for rows.Next() {
 		c, err := scanCertificate(rows)
 		if err != nil {
@@ -212,7 +216,7 @@ func (s *PostgresStore) Versions(ctx context.Context, certificateID string) ([]V
 	}
 	defer rows.Close()
 
-	var out []Version
+	out := []Version{}
 	for rows.Next() {
 		v, err := scanVersion(rows)
 		if err != nil {

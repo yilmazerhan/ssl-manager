@@ -89,7 +89,7 @@ func (s *PostgresStore) List(ctx context.Context) ([]User, error) {
 	}
 	defer rows.Close()
 
-	var out []User
+	out := []User{}
 	for rows.Next() {
 		u, err := scanUser(rows)
 		if err != nil {

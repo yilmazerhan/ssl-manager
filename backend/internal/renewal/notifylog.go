@@ -128,7 +128,7 @@ type rowsScanner interface {
 }
 
 func scanNotificationLogRows(rows rowsScanner) ([]NotificationLogEntry, error) {
-	var out []NotificationLogEntry
+	out := []NotificationLogEntry{}
 	for rows.Next() {
 		var e NotificationLogEntry
 		if err := rows.Scan(&e.ID, &e.CertificateID, &e.ThresholdDays, &e.SentAt, &e.Status, &e.Error, &e.Recipients); err != nil {

@@ -69,7 +69,7 @@ func (s *PostgresStore) ForResource(ctx context.Context, resource, resourceID st
 	}
 	defer rows.Close()
 
-	var out []Record
+	out := []Record{}
 	for rows.Next() {
 		var r Record
 		var metaJSON []byte
