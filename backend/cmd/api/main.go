@@ -103,6 +103,14 @@ func main() {
 		log.Println("DNS-01 automation is not configured (DNS01_PROVIDER unset) — DNS-01 falls back to manual instructions")
 	}
 
+	// A Let's Encrypt account registration failure — a bad contact email, a
+	// directory outage, a rate limit — is an environment problem, not a
+	// reason to refuse to serve anything at all: certificate inventory,
+	// discovery, notifications, and the other three CA integrations have
+	// nothing to do with it. Log it and leave "letsencrypt" out of the
+	// registry, the same way ADCS is left out below when unconfigured, so
+	// an order that actually requests it fails with a clear "provider not
+	// available" instead of the whole backend refusing to start.
 	letsEncrypt, err := ca.NewLetsEncrypt(ctx, ca.LetsEncryptConfig{
 		Environment:        cfg.LetsEncryptEnvironment,
 		DirectoryURL:       cfg.LetsEncryptDirectoryURL,
@@ -110,11 +118,16 @@ func main() {
 		InsecureSkipVerify: cfg.LetsEncryptInsecureSkipVerify,
 	}, secretStore, accounts, dnsAutomation)
 	if err != nil {
-		log.Fatalf("initialize Let's Encrypt client: %v", err)
+		log.Printf("Let's Encrypt is not available: %v — certificate orders requesting ca_provider=letsencrypt will fail until LETSENCRYPT_EMAIL/LETSENCRYPT_DIRECTORY_URL are fixed and the backend restarted", err)
 	}
 	zeroSSL := ca.NewZeroSSL(ca.ZeroSSLConfig{APIKey: cfg.ZeroSSLAPIKey, BaseURL: cfg.ZeroSSLBaseURL})
 	selfSigned := ca.NewSelfSigned(cfg.SelfSignedValidity)
-	authorities := ca.Registry(letsEncrypt, zeroSSL, selfSigned)
+	var authorities map[string]ca.Authority
+	if letsEncrypt != nil {
+		authorities = ca.Registry(letsEncrypt, zeroSSL, selfSigned)
+	} else {
+		authorities = ca.Registry(zeroSSL, selfSigned)
+	}
 	if cfg.ADCSBaseURL != "" {
 		authorities["adcs"] = ca.NewADCS(ca.ADCSConfig{
 			BaseURL:            cfg.ADCSBaseURL,
