@@ -22,11 +22,16 @@ type Certificate struct {
 	NotAfter         time.Time `json:"not_after"`
 	KeyAlgorithm     string    `json:"key_algorithm"`
 	KeyRef           string    `json:"key_ref"`
-	OwningTeam       string    `json:"owning_team"`
-	AutoRenew        bool      `json:"auto_renew"`
-	RenewBeforeDays  int       `json:"renew_before_days"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	// CAReference is provider-specific state needed to act on this
+	// certificate at the CA again (e.g. ZeroSSL's certificate ID); empty
+	// for providers that don't need one (Let's Encrypt) or for
+	// manually-uploaded certificates.
+	CAReference     string    `json:"-"`
+	OwningTeam      string    `json:"owning_team"`
+	AutoRenew       bool      `json:"auto_renew"`
+	RenewBeforeDays int       `json:"renew_before_days"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // Version is an immutable record of one issuance. The private key is never

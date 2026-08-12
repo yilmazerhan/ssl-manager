@@ -59,6 +59,11 @@ type IssuedCertificate struct {
 	FingerprintSHA256 string
 	NotBefore         time.Time
 	NotAfter          time.Time
+	// CAReference is whatever the provider needs to act on this
+	// certificate again later without the CSR/order state around — for
+	// ZeroSSL, its certificate ID; Let's Encrypt doesn't need one since
+	// revoking there only needs the certificate body itself.
+	CAReference string
 }
 
 // Authority is implemented once per certificate authority.
@@ -78,6 +83,10 @@ type Authority interface {
 	CheckChallenge(ctx context.Context, po ProviderOrder) (ProviderOrder, error)
 	// Issue submits csrPEM once every challenge in po is verified.
 	Issue(ctx context.Context, po ProviderOrder, csrPEM string, domains []string) (IssuedCertificate, error)
+	// Revoke tells the CA a previously issued certificate should no
+	// longer be trusted. certPEM is the leaf certificate; caReference is
+	// whatever Issue returned as IssuedCertificate.CAReference for it.
+	Revoke(ctx context.Context, certPEM, caReference string) error
 }
 
 func Registry(authorities ...Authority) map[string]Authority {

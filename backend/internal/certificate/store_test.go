@@ -126,7 +126,7 @@ func TestPostgresStore_UpdateAfterRenewalAndVersions(t *testing.T) {
 	}
 
 	newNotAfter := time.Now().Add(90 * 24 * time.Hour)
-	if err := store.UpdateAfterRenewal(ctx, created.ID, time.Now(), newNotAfter); err != nil {
+	if err := store.UpdateAfterRenewal(ctx, created.ID, time.Now(), newNotAfter, "zerossl-cert-id-123"); err != nil {
 		t.Fatalf("UpdateAfterRenewal: %v", err)
 	}
 
@@ -139,6 +139,9 @@ func TestPostgresStore_UpdateAfterRenewalAndVersions(t *testing.T) {
 	}
 	if !renewed.NotAfter.After(time.Now().Add(80 * 24 * time.Hour)) {
 		t.Errorf("expected NotAfter to be pushed out, got %v", renewed.NotAfter)
+	}
+	if renewed.CAReference != "zerossl-cert-id-123" {
+		t.Errorf("expected CAReference to be updated, got %q", renewed.CAReference)
 	}
 
 	version, err := store.AddVersion(ctx, Version{

@@ -67,6 +67,17 @@ func mockZeroSSLServer(t *testing.T) *httptest.Server {
 		})
 	})
 
+	mux.HandleFunc("/certificates/cert-123/revoke", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if r.FormValue("reason") == "" {
+			t.Errorf("expected a revocation reason to be sent")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+	})
+
 	return httptest.NewServer(mux)
 }
 
@@ -110,5 +121,19 @@ func TestZeroSSL_FullFlow(t *testing.T) {
 	}
 	if issued.FingerprintSHA256 == "" {
 		t.Errorf("expected a fingerprint")
+	}
+	if issued.CAReference != "cert-123" {
+		t.Errorf("expected CAReference to be the ZeroSSL certificate id, got %q", issued.CAReference)
+	}
+
+	if err := z.Revoke(ctx, issued.PEMCert, issued.CAReference); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+}
+
+func TestZeroSSL_Revoke_RequiresCAReference(t *testing.T) {
+	z := NewZeroSSL(ZeroSSLConfig{APIKey: "test-api-key", BaseURL: "http://unused.invalid"})
+	if err := z.Revoke(context.Background(), "irrelevant", ""); err == nil {
+		t.Fatal("expected an error when no certificate id is available to revoke")
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -285,7 +286,24 @@ func (l *LetsEncrypt) Issue(_ context.Context, po ProviderOrder, csrPEM string, 
 		FingerprintSHA256: Fingerprint(leaf.Raw),
 		NotBefore:         leaf.NotBefore,
 		NotAfter:          leaf.NotAfter,
+		CAReference:       finalOrder.Certificate,
 	}, nil
+}
+
+// Revoke doesn't need caReference — unlike ZeroSSL, revoking an ACME
+// certificate only requires the certificate body itself, signed with the
+// account key.
+func (l *LetsEncrypt) Revoke(_ context.Context, certPEM, _ string) error {
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		return fmt.Errorf("letsencrypt: could not PEM-decode certificate to revoke")
+	}
+	if err := l.core.Certificates.Revoke(acme.RevokeCertMessage{
+		Certificate: base64.RawURLEncoding.EncodeToString(block.Bytes),
+	}); err != nil {
+		return fmt.Errorf("letsencrypt: revoke: %w", err)
+	}
+	return nil
 }
 
 func acmeChallengeType(method string) (string, error) {

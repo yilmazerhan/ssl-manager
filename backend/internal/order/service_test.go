@@ -108,6 +108,8 @@ func (a *fakeInstantAuthority) Issue(_ context.Context, _ ca.ProviderOrder, _ st
 	}, nil
 }
 
+func (a *fakeInstantAuthority) Revoke(_ context.Context, _, _ string) error { return nil }
+
 func TestService_CreateAndValidate_IssuesCertificate(t *testing.T) {
 	svc, userID := testService(t)
 	ctx := context.Background()

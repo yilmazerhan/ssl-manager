@@ -131,6 +131,16 @@ func TestLetsEncrypt_FullFlow_HTTP01(t *testing.T) {
 	} else {
 		t.Logf("could not fetch Pebble root for chain verification: %v", err)
 	}
+
+	if err := le.Revoke(ctx, issued.PEMCert, issued.CAReference); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	// A second revocation of the same certificate must be rejected by a
+	// real ACME server (RFC 8555 §7.6) — if it weren't, Revoke wouldn't
+	// actually be reaching Pebble at all.
+	if err := le.Revoke(ctx, issued.PEMCert, issued.CAReference); err == nil {
+		t.Fatal("expected revoking an already-revoked certificate to fail")
+	}
 }
 
 func fetchPebbleRoot() ([]byte, error) {

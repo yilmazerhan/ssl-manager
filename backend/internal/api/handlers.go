@@ -154,11 +154,29 @@ func (h *handlers) renewCertificate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, o.Public())
 }
 
+// revokeCertificate revokes at the certificate authority first, then marks
+// our own record revoked — a certificate this app still thinks is "active"
+// but the CA has already revoked would be a much worse failure mode than
+// the reverse, so the CA call runs first and any failure there stops the
+// whole request.
 func (h *handlers) revokeCertificate(w http.ResponseWriter, r *http.Request) {
 	cert, ok := h.loadCertificateForTeam(w, r)
 	if !ok {
 		return
 	}
+
+	if authority, ok := h.deps.Authorities[cert.CAProvider]; ok {
+		version, err := h.deps.Certs.LatestVersion(r.Context(), cert.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not load certificate material to revoke")
+			return
+		}
+		if err := authority.Revoke(r.Context(), version.PEMCert, cert.CAReference); err != nil {
+			writeError(w, http.StatusBadGateway, "could not revoke at the certificate authority: "+err.Error())
+			return
+		}
+	}
+
 	if err := h.deps.Certs.Revoke(r.Context(), cert.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not revoke certificate")
 		return

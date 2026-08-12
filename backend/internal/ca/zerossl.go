@@ -224,7 +224,29 @@ func (z *ZeroSSL) Issue(ctx context.Context, po ProviderOrder, _ string, _ []str
 		FingerprintSHA256: Fingerprint(leaf.Raw),
 		NotBefore:         leaf.NotBefore,
 		NotAfter:          leaf.NotAfter,
+		CAReference:       state.CertificateID,
 	}, nil
+}
+
+type zerosslRevokeResponse struct {
+	Success bool `json:"success"`
+}
+
+// Revoke doesn't need certPEM — ZeroSSL revokes by certificate ID, unlike
+// Let's Encrypt which needs the certificate body itself.
+func (z *ZeroSSL) Revoke(ctx context.Context, _ string, caReference string) error {
+	if caReference == "" {
+		return fmt.Errorf("zerossl: no certificate id to revoke")
+	}
+	form := url.Values{"reason": {"unspecified"}}
+	var resp zerosslRevokeResponse
+	if err := z.post(ctx, fmt.Sprintf("/certificates/%s/revoke", caReference), form, &resp); err != nil {
+		return fmt.Errorf("zerossl: revoke: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("zerossl: revoke request was not successful")
+	}
+	return nil
 }
 
 func (z *ZeroSSL) post(ctx context.Context, path string, form url.Values, out interface{}) error {

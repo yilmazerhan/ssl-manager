@@ -62,14 +62,14 @@ func (f *fakeCertStore) List(_ context.Context, filter certificate.Filter) ([]ce
 	return out, nil
 }
 
-func (f *fakeCertStore) UpdateAfterRenewal(_ context.Context, id string, notBefore, notAfter time.Time) error {
+func (f *fakeCertStore) UpdateAfterRenewal(_ context.Context, id string, notBefore, notAfter time.Time, caReference string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	c, ok := f.certs[id]
 	if !ok {
 		return certificate.ErrNotFound
 	}
-	c.NotBefore, c.NotAfter, c.Status = notBefore, notAfter, certificate.StatusActive
+	c.NotBefore, c.NotAfter, c.Status, c.CAReference = notBefore, notAfter, certificate.StatusActive, caReference
 	f.certs[id] = c
 	return nil
 }
@@ -205,6 +205,8 @@ func (a *instantAuthority) Issue(_ context.Context, _ ca.ProviderOrder, _ string
 		NotBefore: now, NotAfter: now.Add(90 * 24 * time.Hour),
 	}, nil
 }
+
+func (a *instantAuthority) Revoke(_ context.Context, _, _ string) error { return nil }
 
 type fakeAuditStore struct {
 	mu      sync.Mutex

@@ -14,7 +14,7 @@ type Store interface {
 	Create(ctx context.Context, c Certificate) (Certificate, error)
 	Get(ctx context.Context, id string) (Certificate, error)
 	List(ctx context.Context, filter Filter) ([]Certificate, error)
-	UpdateAfterRenewal(ctx context.Context, id string, notBefore, notAfter time.Time) error
+	UpdateAfterRenewal(ctx context.Context, id string, notBefore, notAfter time.Time, caReference string) error
 	Revoke(ctx context.Context, id string) error
 	// DueForRenewal returns every auto-renewing certificate whose expiry is
 	// within its own renew_before_days window as of asOf.
@@ -37,19 +37,19 @@ func (s *PostgresStore) Create(ctx context.Context, c Certificate) (Certificate,
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO certificate
 			(common_name, sans, ca_provider, validation_method, status, not_before, not_after,
-			 key_algorithm, key_ref, owning_team, auto_renew, renew_before_days)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			 key_algorithm, key_ref, ca_reference, owning_team, auto_renew, renew_before_days)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING id, common_name, sans, ca_provider, validation_method, status, not_before, not_after,
-			key_algorithm, key_ref, owning_team, auto_renew, renew_before_days, created_at, updated_at
+			key_algorithm, key_ref, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days, created_at, updated_at
 	`, c.CommonName, c.SANs, c.CAProvider, c.ValidationMethod, c.Status, c.NotBefore, c.NotAfter,
-		c.KeyAlgorithm, c.KeyRef, c.OwningTeam, c.AutoRenew, c.RenewBeforeDays)
+		c.KeyAlgorithm, c.KeyRef, nullableString(c.CAReference), c.OwningTeam, c.AutoRenew, c.RenewBeforeDays)
 	return scanCertificate(row)
 }
 
 func (s *PostgresStore) Get(ctx context.Context, id string) (Certificate, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT id, common_name, sans, ca_provider, validation_method, status, not_before, not_after,
-			key_algorithm, key_ref, owning_team, auto_renew, renew_before_days, created_at, updated_at
+			key_algorithm, key_ref, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days, created_at, updated_at
 		FROM certificate WHERE id = $1
 	`, id)
 	return scanCertificate(row)
@@ -58,7 +58,7 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (Certificate, error)
 func (s *PostgresStore) List(ctx context.Context, filter Filter) ([]Certificate, error) {
 	query := `
 		SELECT id, common_name, sans, ca_provider, validation_method, status, not_before, not_after,
-			key_algorithm, key_ref, owning_team, auto_renew, renew_before_days, created_at, updated_at
+			key_algorithm, key_ref, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days, created_at, updated_at
 		FROM certificate WHERE 1=1
 	`
 	args := []interface{}{}
@@ -97,16 +97,23 @@ func (s *PostgresStore) List(ctx context.Context, filter Filter) ([]Certificate,
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) UpdateAfterRenewal(ctx context.Context, id string, notBefore, notAfter time.Time) error {
+func (s *PostgresStore) UpdateAfterRenewal(ctx context.Context, id string, notBefore, notAfter time.Time, caReference string) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE certificate
-		SET not_before = $2, not_after = $3, status = 'active', updated_at = now()
+		SET not_before = $2, not_after = $3, ca_reference = $4, status = 'active', updated_at = now()
 		WHERE id = $1
-	`, id, notBefore, notAfter)
+	`, id, notBefore, notAfter, nullableString(caReference))
 	if err != nil {
 		return fmt.Errorf("certificate: update after renewal: %w", err)
 	}
 	return nil
+}
+
+func nullableString(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func (s *PostgresStore) Revoke(ctx context.Context, id string) error {
@@ -122,7 +129,7 @@ func (s *PostgresStore) Revoke(ctx context.Context, id string) error {
 func (s *PostgresStore) DueForRenewal(ctx context.Context, asOf time.Time) ([]Certificate, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, common_name, sans, ca_provider, validation_method, status, not_before, not_after,
-			key_algorithm, key_ref, owning_team, auto_renew, renew_before_days, created_at, updated_at
+			key_algorithm, key_ref, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days, created_at, updated_at
 		FROM certificate
 		WHERE auto_renew
 		  AND status IN ('active', 'expiring')
@@ -191,7 +198,7 @@ type rowScanner interface {
 func scanCertificate(row rowScanner) (Certificate, error) {
 	var c Certificate
 	err := row.Scan(&c.ID, &c.CommonName, &c.SANs, &c.CAProvider, &c.ValidationMethod, &c.Status, &c.NotBefore, &c.NotAfter,
-		&c.KeyAlgorithm, &c.KeyRef, &c.OwningTeam, &c.AutoRenew, &c.RenewBeforeDays, &c.CreatedAt, &c.UpdatedAt)
+		&c.KeyAlgorithm, &c.KeyRef, &c.CAReference, &c.OwningTeam, &c.AutoRenew, &c.RenewBeforeDays, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Certificate{}, ErrNotFound

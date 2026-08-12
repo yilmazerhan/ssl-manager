@@ -160,7 +160,7 @@ func (s *Service) Validate(ctx context.Context, id string) (Order, error) {
 
 	isRenewal := o.CertificateID != ""
 	if isRenewal {
-		if err := s.certs.UpdateAfterRenewal(ctx, o.CertificateID, issued.NotBefore, issued.NotAfter); err != nil {
+		if err := s.certs.UpdateAfterRenewal(ctx, o.CertificateID, issued.NotBefore, issued.NotAfter, issued.CAReference); err != nil {
 			return s.fail(ctx, o, fmt.Sprintf("update renewed certificate: %v", err))
 		}
 	} else {
@@ -174,6 +174,7 @@ func (s *Service) Validate(ctx context.Context, id string) (Order, error) {
 			NotAfter:         issued.NotAfter,
 			KeyAlgorithm:     o.KeyAlgorithm,
 			KeyRef:           o.KeyRef,
+			CAReference:      issued.CAReference,
 			OwningTeam:       o.OwningTeam,
 			AutoRenew:        true,
 			RenewBeforeDays:  30,

@@ -59,6 +59,20 @@ The full architecture and delivery plan is in [`docs/plan.html`](docs/plan.html)
   default), SMTP, and Slack/Teams-compatible incoming webhook senders.
 - **Audit log** (`backend/internal/audit`) — every issuance, renewal,
   download, and role change is recorded with actor, scope, and resource.
+- **Revocation reaches the CA.** `POST /certificates/{id}/revoke` calls
+  Let's Encrypt's real ACME revoke endpoint or ZeroSSL's revoke endpoint
+  *before* marking the certificate revoked in our own database — a
+  certificate we think is revoked but the CA still considers valid would
+  be a much worse failure mode than the reverse. Verified live against
+  Pebble, including confirming Pebble itself rejects revoking an
+  already-revoked certificate (`alreadyRevoked`) rather than silently
+  succeeding twice.
+- **Admin frontend**: an Integrations page reporting live connection
+  status for each CA and DNS-01 automation, and a Users page for
+  role/team changes and minting API keys.
+- **Inventory filters**: team (admin/API-only only — everyone else is
+  already scoped to their own team server-side), status, CA provider,
+  and expiring-within-days.
 - **Frontend** (`frontend/`, React + TypeScript + Vite) — dashboard,
   certificate inventory, certificate detail, and the from-scratch
   certificate wizard, now wired to real auth and the download-token flow.
