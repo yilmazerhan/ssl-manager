@@ -27,6 +27,44 @@ func TestExpandTargets(t *testing.T) {
 	}
 }
 
+func TestExpandTargets_RejectsLinkLocalTargets(t *testing.T) {
+	// 169.254.169.254 is the cloud metadata address on AWS/GCP/Azure — a
+	// scanner that can freely dial it would let an admin (or an admin
+	// session hijacked some other way) use this server as a probe against
+	// its own cloud instance's credentials endpoint.
+	for _, target := range []string{"169.254.169.254", "169.254.0.0/16", "fe80::1"} {
+		if _, err := expandTargets([]string{target}); err == nil {
+			t.Errorf("expected %q to be rejected as link-local, got no error", target)
+		}
+	}
+}
+
+func TestExpandTargets_AllowsLoopbackAndPrivateRanges(t *testing.T) {
+	// The whole point of this feature is scanning internal/private
+	// networks — only link-local should be special-cased, not RFC1918 or
+	// loopback.
+	out, err := expandTargets([]string{"127.0.0.1", "10.0.0.5", "192.168.1.1"})
+	if err != nil {
+		t.Fatalf("expected loopback/private targets to be allowed, got: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("expected 3 targets, got %d", len(out))
+	}
+}
+
+func TestProbe_RefusesLinkLocalHostname(t *testing.T) {
+	// A hostname that resolves to a link-local/metadata address must be
+	// refused at probe time too — expandTargets only sees literal
+	// IPs/CIDRs, so a DNS name is the bypass this closes.
+	result := probe(context.Background(), "169.254.169.254", 80, time.Second)
+	if result.Reachable {
+		t.Fatalf("expected a link-local target to be refused without attempting to connect")
+	}
+	if result.Error == "" {
+		t.Errorf("expected an explanatory error for the refusal")
+	}
+}
+
 func TestExpandTargets_RejectsOversizedRange(t *testing.T) {
 	// A /8 expands to ~16.7 million addresses, far past MaxTargetsExpanded.
 	_, err := expandTargets([]string{"10.0.0.0/8"})

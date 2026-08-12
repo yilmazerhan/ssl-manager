@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net"
 	"strconv"
 	"sync"
@@ -38,6 +39,9 @@ func expandTargets(inputs []string) ([]string, error) {
 		}
 		if ip, ipNet, err := net.ParseCIDR(in); err == nil {
 			for cur := ip.Mask(ipNet.Mask); ipNet.Contains(cur); incIP(cur) {
+				if isLinkLocal(cur) {
+					return nil, fmt.Errorf("target %q includes link-local address %s (e.g. a cloud metadata service) — not permitted", in, cur)
+				}
 				out = append(out, cur.String())
 				if len(out) > MaxTargetsExpanded {
 					return nil, fmt.Errorf("target list expands past %d hosts (stopped at %q) — narrow the range", MaxTargetsExpanded, in)
@@ -46,12 +50,56 @@ func expandTargets(inputs []string) ([]string, error) {
 			}
 			continue
 		}
+		if ip := net.ParseIP(in); ip != nil && isLinkLocal(ip) {
+			return nil, fmt.Errorf("target %q is a link-local address (e.g. a cloud metadata service) — not permitted", in)
+		}
 		out = append(out, in)
 		if len(out) > MaxTargetsExpanded {
 			return nil, fmt.Errorf("target list exceeds %d hosts — narrow the range", MaxTargetsExpanded)
 		}
 	}
 	return out, nil
+}
+
+// isLinkLocal covers 169.254.0.0/16 and fe80::/10 — the range every major
+// cloud provider's instance-metadata service (which can hand out real
+// credentials) lives in, and one with no legitimate use for a TLS
+// certificate discovery tool. RFC1918/loopback are deliberately NOT
+// blocked here: scanning a private network or localhost is this feature's
+// entire point.
+func isLinkLocal(ip net.IP) bool {
+	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+}
+
+// resolveDialAddr resolves host — a literal IP or a hostname — to a
+// single IP to dial, refusing if it's link-local. Resolving hostnames
+// fresh closes the DNS-name bypass expandTargets-time checking can't (it
+// only sees literal IPs/CIDRs). The caller dials the *returned* IP
+// directly rather than the original hostname — checking a hostname's
+// resolved address and then letting net.Dialer re-resolve it independently
+// a moment later would leave a DNS-rebinding TOCTOU window open: a
+// malicious authoritative server could answer the check with a safe
+// address and the real dial with a link-local one.
+func resolveDialAddr(ctx context.Context, host string) (string, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		if isLinkLocal(ip) {
+			return "", fmt.Errorf("target resolves to a link-local address (e.g. a cloud metadata service) — refusing to connect")
+		}
+		return ip.String(), nil
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	if len(addrs) == 0 {
+		return "", fmt.Errorf("no addresses found for %s", host)
+	}
+	for _, a := range addrs {
+		if isLinkLocal(a.IP) {
+			return "", fmt.Errorf("target resolves to a link-local address (e.g. a cloud metadata service) — refusing to connect")
+		}
+	}
+	return addrs[0].IP.String(), nil
 }
 
 func dupIP(ip net.IP) net.IP {
@@ -96,8 +144,14 @@ type probeResult struct {
 func probe(ctx context.Context, host string, port int, timeout time.Duration) probeResult {
 	result := probeResult{Host: host, Port: port}
 
+	dialAddr, err := resolveDialAddr(ctx, host)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+
 	dialer := &net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(dialAddr, strconv.Itoa(port)))
 	if err != nil {
 		result.Error = err.Error()
 		return result
@@ -105,6 +159,8 @@ func probe(ctx context.Context, host string, port int, timeout time.Duration) pr
 	defer conn.Close()
 	result.Reachable = true
 
+	// ServerName stays the original hostname (not dialAddr) — that's what
+	// SNI and certificate hostname validation are supposed to see.
 	tlsConn := tls.Client(conn, &tls.Config{InsecureSkipVerify: true, ServerName: host})
 	tlsConn.SetDeadline(time.Now().Add(timeout))
 	if err := tlsConn.Handshake(); err != nil {
@@ -182,10 +238,22 @@ func runProbes(ctx context.Context, hosts []string, ports []int, timeout time.Du
 				if ctx.Err() != nil {
 					return
 				}
-				r := probe(ctx, t.host, t.port, timeout)
-				mu.Lock()
-				onResult(r)
-				mu.Unlock()
+				// recover() only protects the goroutine it runs in — a
+				// panic here would otherwise crash the whole process (Go
+				// doesn't let a caller's recover catch a panic from a
+				// different goroutine), taking every user's request down
+				// with it over what should be, at worst, one bad probe.
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("discovery: recovered from panic probing %s:%d: %v", t.host, t.port, r)
+						}
+					}()
+					r := probe(ctx, t.host, t.port, timeout)
+					mu.Lock()
+					onResult(r)
+					mu.Unlock()
+				}()
 			}
 		}()
 	}

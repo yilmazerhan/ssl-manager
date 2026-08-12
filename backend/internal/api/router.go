@@ -115,7 +115,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	mux.Handle("POST /api/v1/users/{id}/role", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.setUserRole))))
 	mux.Handle("POST /api/v1/users/{id}/api-keys", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.createAPIKey))))
 
-	return withCORS(mux)
+	return withCORS(withMaxBody(mux))
 }
 
 func withCORS(next http.Handler) http.Handler {
@@ -127,6 +127,21 @@ func withCORS(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// maxRequestBodyBytes caps every request body before any handler-level
+// validation runs — otherwise a caller could send a multi-gigabyte JSON
+// array (a discovery scan's targets/ports, a certificate's notify_emails)
+// and exhaust server memory during json.Decode, before length checks like
+// MaxTargetsExpanded or maxDomainsPerOrder ever get a chance to reject it.
+// 4MB is generous for anything this API legitimately accepts.
+const maxRequestBodyBytes = 4 << 20
+
+func withMaxBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 		next.ServeHTTP(w, r)
 	})
 }

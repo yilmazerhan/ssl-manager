@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"fmt"
 	"os"
 	"testing"
 
@@ -147,6 +148,41 @@ func TestService_CreateAndValidate_IssuesCertificate(t *testing.T) {
 	}
 	if validated.CertificateID == "" {
 		t.Fatalf("expected a certificate ID to be set")
+	}
+}
+
+// TestValidateDomains_RejectsInjectionAttempts proves a domain carrying
+// control characters or CRLF — which would otherwise flow through to
+// certificate.CommonName and, eventually, a raw SMTP header in an expiry
+// reminder email — is rejected before an order is ever created from it.
+func TestValidateDomains_RejectsInjectionAttempts(t *testing.T) {
+	bad := []string{
+		"evil.com\r\nBcc: attacker@evil.com",
+		"has spaces.example.com",
+		"",
+		"tab\there.com",
+	}
+	for _, d := range bad {
+		if err := validateDomains([]string{d}); err == nil {
+			t.Errorf("expected %q to be rejected", d)
+		}
+	}
+}
+
+func TestValidateDomains_AllowsRealisticHostnames(t *testing.T) {
+	good := []string{"localhost", "app.example.com", "*.kron.com.tr", "internal-app.corp.test"}
+	if err := validateDomains(good); err != nil {
+		t.Errorf("expected realistic hostnames to be accepted, got: %v", err)
+	}
+}
+
+func TestValidateDomains_RejectsTooManyDomains(t *testing.T) {
+	domains := make([]string, maxDomainsPerOrder+1)
+	for i := range domains {
+		domains[i] = fmt.Sprintf("d%d.example.com", i)
+	}
+	if err := validateDomains(domains); err == nil {
+		t.Errorf("expected more than %d domains to be rejected", maxDomainsPerOrder)
 	}
 }
 

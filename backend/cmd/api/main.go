@@ -4,7 +4,9 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"net/url"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +30,36 @@ import (
 
 func main() {
 	cfg := config.Load()
+
+	// Refuse to run with a forgeable session secret unless this is
+	// unmistakably a dev/test deployment (DevAuthEnabled is itself an
+	// explicit "not production" flag). Anyone who reads this repo's source
+	// knows the default string; on a real deployment where an operator
+	// forgot to set SESSION_SECRET, that would mean anyone can forge a
+	// valid admin session JWT with no credentials at all.
+	if !cfg.DevAuthEnabled && (cfg.SessionSecret == "" || cfg.SessionSecret == config.InsecureDefaultSessionSecret) {
+		log.Fatal("SESSION_SECRET is unset (or still the insecure default) and DEV_AUTH_ENABLED is false — refusing to start with a forgeable session secret in what looks like a production configuration")
+	}
+	// DevAuthEnabled itself is the bigger risk this check leans on: it
+	// registers POST /auth/dev-login, which mints a real session for any
+	// email/role/team with zero credential check. Being the escape hatch
+	// for the check above doesn't make it safe — a deployment could set
+	// this specifically to sail past that check while still being fully
+	// exposed. Warn loudly every time it's on, the same as the
+	// InsecureSkipVerify flags below, so it can't go unnoticed in a
+	// deployment's own startup logs.
+	if cfg.DevAuthEnabled {
+		log.Println("SECURITY WARNING: DEV_AUTH_ENABLED is true — POST /auth/dev-login will mint a real session for ANY email/role/team with no credential check at all. This must never be true on anything reachable outside local development.")
+	}
+	if cfg.ADCSAllowBasicAuth && !strings.HasPrefix(cfg.ADCSBaseURL, "https://") {
+		log.Fatal("ADCS_ALLOW_BASIC_AUTH is set but ADCS_BASE_URL is not https:// — refusing to start, since that would send credentials in cleartext")
+	}
+	if cfg.LetsEncryptInsecureSkipVerify {
+		log.Println("SECURITY WARNING: LETSENCRYPT_INSECURE_SKIP_VERIFY is true — TLS verification against the ACME directory is disabled. This must never be set against a real CA, only a local test server like Pebble.")
+	}
+	if cfg.ADCSInsecureSkipVerify {
+		log.Println("SECURITY WARNING: ADCS_INSECURE_SKIP_VERIFY is true — TLS verification against the AD CS server is disabled. Only use this against a CA whose certificate you can't otherwise validate for a known-good reason.")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -99,7 +131,7 @@ func main() {
 	integrationsStatus.SelfSigned.Available = true
 	integrationsStatus.SelfSigned.ValidityPeriod = cfg.SelfSignedValidity.String()
 	integrationsStatus.ADCS.Configured = cfg.ADCSBaseURL != ""
-	integrationsStatus.ADCS.BaseURL = cfg.ADCSBaseURL
+	integrationsStatus.ADCS.BaseURL = stripURLCredentials(cfg.ADCSBaseURL)
 	integrationsStatus.ADCS.Template = cfg.ADCSTemplate
 
 	orderService := order.NewService(orders, certs, keyManager, authorities)
@@ -179,7 +211,7 @@ func buildIntegrationsStatus(ctx context.Context, cfg config.Config, accounts ca
 	var status api.IntegrationsStatus
 
 	status.LetsEncrypt.Environment = cfg.LetsEncryptEnvironment
-	status.LetsEncrypt.DirectoryURL = cfg.LetsEncryptDirectoryURL
+	status.LetsEncrypt.DirectoryURL = stripURLCredentials(cfg.LetsEncryptDirectoryURL)
 	status.LetsEncrypt.ContactEmail = cfg.LetsEncryptEmail
 	if account, err := accounts.Get(ctx, "letsencrypt", cfg.LetsEncryptEnvironment); err == nil {
 		status.LetsEncrypt.AccountRegistered = account.AccountRef != ""
@@ -192,6 +224,25 @@ func buildIntegrationsStatus(ctx context.Context, cfg config.Config, accounts ca
 	status.DNS01.Configured = dnsConfigured
 
 	return status
+}
+
+// stripURLCredentials removes any embedded userinfo (https://user:pass@…)
+// before a configured CA URL is echoed back through GET /api/v1/integrations
+// — an admin-only endpoint, but there's no reason for it to ever repeat a
+// credential an operator (mis)configured directly into a URL rather than
+// its own dedicated username/password field. Falls back to the raw string
+// if it doesn't parse as a URL at all, since this is a display value, not
+// something anything else depends on.
+func stripURLCredentials(rawURL string) string {
+	if rawURL == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	u.User = nil
+	return u.String()
 }
 
 func buildNotifier(cfg config.Config) notify.Sender {

@@ -115,6 +115,23 @@ func (s *Service) RecoverInterruptedScans(ctx context.Context) error {
 
 func (s *Service) run(ctx context.Context, sc Scan, hosts []string, ports []int) {
 	defer s.cancels.Delete(sc.ID)
+	// This always runs as its own goroutine (the only call site is `go
+	// s.run(...)`), so an unrecovered panic here would crash the whole
+	// process, not just this scan. Recovering also means the scan record
+	// itself doesn't get stuck reporting "running" forever with nothing
+	// left alive to ever finish it.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("discovery: recovered from panic running scan %s: %v", sc.ID, r)
+			completed := time.Now()
+			sc.Status = ScanStatusFailed
+			sc.Error = fmt.Sprintf("internal error: %v", r)
+			sc.CompletedAt = &completed
+			if err := s.store.UpdateScan(context.Background(), sc); err != nil {
+				log.Printf("discovery: mark panicked scan %s failed: %v", sc.ID, err)
+			}
+		}
+	}()
 
 	now := time.Now()
 	sc.Status = ScanStatusRunning

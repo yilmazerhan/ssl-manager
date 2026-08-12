@@ -58,7 +58,7 @@ func NewEngine(certs certificate.Store, orders *order.Service, auditStore audit.
 // Run blocks, ticking immediately and then on cfg.Interval, until ctx is
 // canceled.
 func (e *Engine) Run(ctx context.Context) {
-	e.Tick(ctx)
+	e.tickRecovered(ctx)
 	ticker := time.NewTicker(e.cfg.Interval)
 	defer ticker.Stop()
 	for {
@@ -66,9 +66,24 @@ func (e *Engine) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			e.Tick(ctx)
+			e.tickRecovered(ctx)
 		}
 	}
+}
+
+// tickRecovered runs one Tick with a panic recovered rather than
+// propagated — this is the only long-lived background goroutine most
+// deployments run, so a single bad tick (a nil pointer on an edge case, an
+// unexpected type assertion) would otherwise crash the whole process and
+// take every user's request down with it, not just that tick's own work.
+// The loop in Run keeps going on the next interval either way.
+func (e *Engine) tickRecovered(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("renewal: recovered from panic in Tick: %v", r)
+		}
+	}()
+	e.Tick(ctx)
 }
 
 func (e *Engine) Tick(ctx context.Context) {

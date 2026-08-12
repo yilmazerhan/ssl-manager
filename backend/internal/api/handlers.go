@@ -2,7 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"regexp"
+	"slices"
 	"strconv"
 	"time"
 
@@ -325,6 +328,14 @@ func (h *handlers) updateNotificationSettings(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "at least one threshold day is required")
 		return
 	}
+	if err := validateEmails(req.DefaultRecipients); err != nil {
+		writeError(w, http.StatusBadRequest, "default_recipients: "+err.Error())
+		return
+	}
+	if err := validateEmails(req.EscalationRecipients); err != nil {
+		writeError(w, http.StatusBadRequest, "escalation_recipients: "+err.Error())
+		return
+	}
 	if err := renewal.ValidateTemplates(req.EmailSubjectTemplate, req.EmailBodyTemplate); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid template: "+err.Error())
 		return
@@ -375,6 +386,10 @@ func (h *handlers) updateCertificateNotifyEmails(w http.ResponseWriter, r *http.
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := validateEmails(req.Emails); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := h.deps.Certs.UpdateNotifyEmails(r.Context(), cert.ID, req.Emails); err != nil {
@@ -433,6 +448,10 @@ func (h *handlers) listUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, users)
 }
 
+var validRoles = map[user.Role]bool{
+	user.RoleViewer: true, user.RoleCertManager: true, user.RoleAdmin: true, user.RoleAPIOnly: true,
+}
+
 func (h *handlers) setUserRole(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Role user.Role `json:"role"`
@@ -440,6 +459,10 @@ func (h *handlers) setUserRole(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !validRoles[req.Role] {
+		writeError(w, http.StatusBadRequest, "unknown role")
 		return
 	}
 	id := r.PathValue("id")
@@ -451,6 +474,12 @@ func (h *handlers) setUserRole(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
+// createAPIKey never grants a scope beyond what the target user's own role
+// already earns — otherwise a key holder whose scopes happen to exceed
+// their role (e.g. an over-provisioned earlier key) could mint themselves a
+// fresh, durable key at the wider scope and outlive any correction to the
+// original mismatch. Role, not scope, is the source of truth for how much
+// a user is allowed to grant.
 func (h *handlers) createAPIKey(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name   string   `json:"name"`
@@ -461,6 +490,26 @@ func (h *handlers) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+
+	target, err := h.deps.Users.GetByID(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	// api_only is the deliberate exception: its whole purpose is a service
+	// account whose permissions are entirely defined by the keys minted for
+	// it rather than a fixed role->scope mapping (RoleScopes returns nil for
+	// it), so any of the four known scopes is legitimate there.
+	allowed := auth.RoleScopes(target.Role)
+	if target.Role == user.RoleAPIOnly {
+		allowed = []string{string(auth.ScopeCertsRead), string(auth.ScopeCertsExport), string(auth.ScopeCertsIssue), string(auth.ScopeCertsAdmin)}
+	}
+	for _, s := range req.Scopes {
+		if !slices.Contains(allowed, s) {
+			writeError(w, http.StatusBadRequest, "scope "+s+" exceeds what this user's role permits")
+			return
+		}
+	}
 
 	raw, err := h.deps.APIKeys.Create(r.Context(), id, req.Name, req.Scopes)
 	if err != nil {
@@ -504,4 +553,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+// emailPattern is deliberately permissive about what counts as an email
+// address — its job isn't RFC 5322 validation, it's rejecting whitespace
+// and control characters (CR/LF above all) before a value that's headed
+// for a raw SMTP "To:"/"Bcc:" header line ever gets there. A crafted
+// recipient containing "\r\nBcc: attacker@evil.com" would otherwise inject
+// an extra header into every reminder email sent for that certificate.
+var emailPattern = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
+
+func validateEmails(emails []string) error {
+	for _, e := range emails {
+		if !emailPattern.MatchString(e) {
+			return fmt.Errorf("invalid email address %q", e)
+		}
+	}
+	return nil
 }

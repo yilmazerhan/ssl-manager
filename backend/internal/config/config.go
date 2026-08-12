@@ -14,6 +14,14 @@ import (
 	"time"
 )
 
+// InsecureDefaultSessionSecret is what SessionSecret falls back to when
+// SESSION_SECRET isn't set — convenient for `go run ./cmd/api` against a
+// local dev stack, and a real vulnerability anywhere it's reachable: it's
+// public, checked into this repo's source, and would let anyone forge a
+// valid admin session JWT offline. cmd/api/main.go refuses to start on
+// this value unless DevAuthEnabled is also true.
+const InsecureDefaultSessionSecret = "insecure-dev-secret-change-me"
+
 type Config struct {
 	Addr string
 
@@ -106,7 +114,7 @@ func Load() Config {
 		ADCSAllowBasicAuth:     getBool("ADCS_ALLOW_BASIC_AUTH", false),
 		ADCSInsecureSkipVerify: getBool("ADCS_INSECURE_SKIP_VERIFY", false),
 
-		SessionSecret: getEnv("SESSION_SECRET", "insecure-dev-secret-change-me"),
+		SessionSecret: getEnv("SESSION_SECRET", InsecureDefaultSessionSecret),
 		SessionTTL:    getDuration("SESSION_TTL", 12*time.Hour),
 
 		OIDCIssuerURL:    getEnv("OIDC_ISSUER_URL", ""),

@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,6 +20,34 @@ import (
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/secrets"
 )
+
+// maxDomainsPerOrder bounds both the CSR's SAN list and, downstream, how
+// much a range-over-domains reminder-email template can fan out to.
+const maxDomainsPerOrder = 100
+
+// domainPattern is deliberately permissive about DNS-label structure (it
+// accepts single-label internal hostnames like "localhost", not just
+// public-style FQDNs) but strict about the character set: only
+// alphanumerics, hyphens, dots, and a single leading "*." wildcard. That's
+// enough to keep a domain out of a raw SMTP header — CommonName ends up in
+// the expiry-reminder email's subject — without rejecting any legitimate
+// internal/test hostname.
+var domainPattern = regexp.MustCompile(`^(\*\.)?[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*$`)
+
+func validateDomains(domains []string) error {
+	if len(domains) == 0 {
+		return fmt.Errorf("at least one domain is required")
+	}
+	if len(domains) > maxDomainsPerOrder {
+		return fmt.Errorf("at most %d domains are allowed per order, got %d", maxDomainsPerOrder, len(domains))
+	}
+	for _, d := range domains {
+		if d == "" || len(d) > 253 || !domainPattern.MatchString(d) {
+			return fmt.Errorf("invalid domain %q", d)
+		}
+	}
+	return nil
+}
 
 type Service struct {
 	orders      Store
@@ -36,8 +65,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Order, error) 
 	if !ok {
 		return Order{}, fmt.Errorf("unknown ca_provider %q", req.CAProvider)
 	}
-	if len(req.Domains) == 0 {
-		return Order{}, fmt.Errorf("at least one domain is required")
+	if err := validateDomains(req.Domains); err != nil {
+		return Order{}, err
 	}
 	if req.KeyAlgorithm == "" {
 		req.KeyAlgorithm = "RSA-2048"

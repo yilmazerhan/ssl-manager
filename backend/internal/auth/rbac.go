@@ -80,13 +80,24 @@ func Middleware(sessions *SessionManager, users user.Store, keys apikey.Store) f
 				return
 			}
 
+			// A session JWT's Role/Team claims are only as fresh as the
+			// moment it was issued — if an admin demotes this user or moves
+			// them to a different team, a still-valid token would otherwise
+			// keep acting on the old privileges until it expires. Re-fetch
+			// the current row instead of trusting the claims, the same way
+			// the API-key path below already does.
 			if claims, err := sessions.Parse(raw); err == nil {
+				u, err := users.GetByID(r.Context(), claims.Subject)
+				if err != nil {
+					unauthorized(w, "invalid session token")
+					return
+				}
 				next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), Identity{
-					UserID: claims.Subject,
-					Email:  claims.Email,
-					Role:   user.Role(claims.Role),
-					Team:   claims.Team,
-					Scopes: RoleScopes(user.Role(claims.Role)),
+					UserID: u.ID,
+					Email:  u.Email,
+					Role:   u.Role,
+					Team:   u.Team,
+					Scopes: RoleScopes(u.Role),
 				})))
 				return
 			}
