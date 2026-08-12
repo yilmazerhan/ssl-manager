@@ -277,6 +277,30 @@ export const api = {
   updateNotifyEmails: (id: string, emails: string[]) =>
     request<{ status: string }>(`/certificates/${id}/notify-emails`, { method: "POST", body: JSON.stringify({ emails }) }),
 
+  login: (username: string, password: string) =>
+    fetch("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    }).then(async (res) => {
+      const body = await res.json().catch(() => ({ error: res.statusText }));
+      if (!res.ok) throw new ApiError(body.error ?? "sign in failed");
+      return body as { token: string; must_change_password: boolean };
+    }),
+  // Deliberately not routed through request(): a wrong *current* password
+  // here is a 401 too, but it must show an inline error, not trigger
+  // request()'s "session expired, log out and reload" handling.
+  changePassword: (currentPassword: string, newPassword: string) =>
+    fetch("/api/v1/auth/change-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY) ?? ""}` },
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    }).then(async (res) => {
+      const body = await res.json().catch(() => ({ error: res.statusText }));
+      if (!res.ok) throw new ApiError(body.error ?? "could not change password");
+      return body as { status: string; token: string };
+    }),
+
   devLogin: (email: string, role: string, team: string) =>
     fetch("/auth/dev-login", {
       method: "POST",

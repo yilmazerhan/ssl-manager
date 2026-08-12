@@ -4,6 +4,7 @@ import Inventory from "./pages/Inventory";
 import CertificateDetail from "./pages/CertificateDetail";
 import NewCertificateWizard from "./pages/NewCertificateWizard";
 import Login from "./pages/Login";
+import ChangePassword from "./pages/ChangePassword";
 import Integrations from "./pages/Integrations";
 import AdminUsers from "./pages/AdminUsers";
 import Discovery from "./pages/Discovery";
@@ -15,6 +16,13 @@ export default function App() {
 
   if (!identity) {
     return <Login />;
+  }
+
+  // A still-assigned password blocks everything else — the backend
+  // enforces this on every request too (RequirePasswordChange), this just
+  // avoids a round trip of 403s before landing here anyway.
+  if (identity.mustChangePassword) {
+    return <ChangePassword />;
   }
 
   const isAdmin = identity.role === "admin";

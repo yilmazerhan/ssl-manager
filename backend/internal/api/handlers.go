@@ -520,6 +520,67 @@ func (h *handlers) createAPIKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"key": raw})
 }
 
+// changePassword lets the currently authenticated identity replace its
+// own local password. It's the one endpoint reachable while
+// MustChangePassword is still set (see router.go's authedOnly vs authed),
+// since it's exactly what clears that flag. It reissues a fresh session
+// token so the client's decoded must_change_password claim goes stale
+// immediately, rather than the browser needing to log in again for that
+// to take effect.
+func (h *handlers) changePassword(w http.ResponseWriter, r *http.Request) {
+	identity, _ := auth.IdentityFromContext(r.Context())
+
+	var req struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	u, err := h.deps.Users.GetByID(r.Context(), identity.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load account")
+		return
+	}
+	if u.PasswordHash == "" {
+		writeError(w, http.StatusBadRequest, "this account has no local password to change — it signs in via SSO")
+		return
+	}
+	if !auth.VerifyPassword(u.PasswordHash, req.CurrentPassword) {
+		writeError(w, http.StatusUnauthorized, "current password is incorrect")
+		return
+	}
+	if err := auth.ValidatePassword(req.NewPassword); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.NewPassword == req.CurrentPassword {
+		writeError(w, http.StatusBadRequest, "new password must be different from the current password")
+		return
+	}
+
+	hash, err := auth.HashPassword(req.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not set new password")
+		return
+	}
+	if err := h.deps.Users.SetPassword(r.Context(), u.ID, hash, false); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not set new password")
+		return
+	}
+	u.PasswordHash, u.MustChangePassword = hash, false
+
+	token, err := h.deps.Sessions.Issue(u)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "password changed, but could not issue a new session — please log in again")
+		return
+	}
+	h.audit(r, "password_changed", "user", u.ID, "", nil)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "token": token})
+}
+
 // loadCertificateForTeam fetches the path {id} certificate and enforces
 // team scoping in one place — every handler that acts on a specific
 // certificate goes through it.

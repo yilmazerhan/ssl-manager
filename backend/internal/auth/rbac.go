@@ -38,11 +38,12 @@ func RoleScopes(role user.Role) []string {
 // Identity is what every authenticated request carries in its context,
 // regardless of whether it came from a browser session or an API key.
 type Identity struct {
-	UserID string
-	Email  string
-	Role   user.Role
-	Team   string
-	Scopes []string
+	UserID             string
+	Email              string
+	Role               user.Role
+	Team               string
+	Scopes             []string
+	MustChangePassword bool
 }
 
 func (i Identity) HasScope(scope Scope) bool {
@@ -93,11 +94,12 @@ func Middleware(sessions *SessionManager, users user.Store, keys apikey.Store) f
 					return
 				}
 				next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), Identity{
-					UserID: u.ID,
-					Email:  u.Email,
-					Role:   u.Role,
-					Team:   u.Team,
-					Scopes: RoleScopes(u.Role),
+					UserID:             u.ID,
+					Email:              u.Email,
+					Role:               u.Role,
+					Team:               u.Team,
+					Scopes:             RoleScopes(u.Role),
+					MustChangePassword: u.MustChangePassword,
 				})))
 				return
 			}
@@ -141,6 +143,25 @@ func RequireScope(scope Scope) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// RequirePasswordChange blocks every request from an identity whose
+// account still has a forced/assigned password until they change it —
+// otherwise the seeded default admin account (or any admin-assigned
+// password) would be a real, standing credential rather than a one-time
+// bootstrap step. It must run after Middleware, and must never wrap the
+// change-password endpoint itself.
+func RequirePasswordChange(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		identity, _ := IdentityFromContext(r.Context())
+		if identity.MustChangePassword {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"password change required","code":"password_change_required"}`))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func bearerToken(r *http.Request) string {

@@ -76,11 +76,22 @@ func NewRouter(deps Dependencies) http.Handler {
 		mux.HandleFunc("GET /auth/login", deps.OIDC.Login)
 		mux.HandleFunc("GET /auth/callback", deps.OIDC.Callback)
 	}
+	mux.HandleFunc("POST /auth/login", auth.LocalLoginHandler(deps.Sessions, deps.Users))
 	if deps.DevAuthEnabled {
 		mux.HandleFunc("POST /auth/dev-login", auth.DevLoginHandler(deps.Sessions, deps.Users))
 	}
 
-	authed := auth.Middleware(deps.Sessions, deps.Users, deps.APIKeys)
+	// authedOnly is plain authentication with no further gate — used only
+	// by change-password, since that's the one endpoint an account with
+	// MustChangePassword set must still be able to reach. Every other
+	// authed route goes through `authed`, which additionally blocks until
+	// that password has actually been changed.
+	authedOnly := auth.Middleware(deps.Sessions, deps.Users, deps.APIKeys)
+	authed := func(next http.Handler) http.Handler {
+		return authedOnly(auth.RequirePasswordChange(next))
+	}
+
+	mux.Handle("POST /api/v1/auth/change-password", authedOnly(http.HandlerFunc(h.changePassword)))
 
 	mux.Handle("GET /api/v1/certificates", authed(auth.RequireScope(auth.ScopeCertsRead)(http.HandlerFunc(h.listCertificates))))
 	mux.Handle("GET /api/v1/certificates/{id}", authed(auth.RequireScope(auth.ScopeCertsRead)(http.HandlerFunc(h.getCertificate))))

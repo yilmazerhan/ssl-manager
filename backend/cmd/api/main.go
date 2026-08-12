@@ -85,6 +85,7 @@ func main() {
 	certs := certificate.NewPostgresStore(pool)
 	orders := order.NewPostgresStore(pool)
 	users := user.NewPostgresStore(pool)
+	seedDefaultAdmin(ctx, users)
 	accounts := caaccount.NewPostgresStore(pool)
 	apiKeys := apikey.NewPostgresStore(pool)
 	downloadTokens := downloadtoken.NewPostgresStore(pool)
@@ -200,6 +201,34 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
+}
+
+// seedDefaultAdmin creates the well-known "admin"/"admin" local account
+// the very first time this app ever runs against a given database — and
+// never again, so deleting or renaming it afterward sticks. It's the only
+// way in without configuring OIDC first, which is exactly what makes it
+// dangerous: MustChangePassword forces the password away from "admin" on
+// first login (enforced server-side by auth.RequirePasswordChange, not
+// just the frontend), and this prints a warning every time the account is
+// created so it can't seed silently in a deployment's own startup logs.
+func seedDefaultAdmin(ctx context.Context, users *user.PostgresStore) {
+	n, err := users.CountLocalUsers(ctx)
+	if err != nil {
+		log.Printf("check for existing local accounts: %v", err)
+		return
+	}
+	if n > 0 {
+		return
+	}
+	hash, err := auth.HashPassword("admin")
+	if err != nil {
+		log.Fatalf("hash default admin password: %v", err)
+	}
+	if err := users.EnsureLocalAdmin(ctx, "admin", "admin@local.ssl-manager", hash, user.RoleAdmin); err != nil {
+		log.Printf("seed default admin account: %v", err)
+		return
+	}
+	log.Println("SECURITY WARNING: no local account existed yet, so a default account was seeded — username \"admin\", password \"admin\", role admin. It must change its password on first login (enforced server-side). Change it immediately if this instance is reachable by anyone you don't trust with admin access.")
 }
 
 // buildIntegrationsStatus is a one-time snapshot for the admin-facing

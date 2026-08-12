@@ -25,6 +25,9 @@ func (f *fakeUserStore) GetByID(_ context.Context, id string) (user.User, error)
 func (f *fakeUserStore) GetByEmail(context.Context, string) (user.User, error) {
 	return user.User{}, user.ErrNotFound
 }
+func (f *fakeUserStore) GetByUsername(context.Context, string) (user.User, error) {
+	return user.User{}, user.ErrNotFound
+}
 func (f *fakeUserStore) GetOrCreateByOIDCSubject(context.Context, string, string) (user.User, error) {
 	return user.User{}, nil
 }
@@ -35,6 +38,18 @@ func (f *fakeUserStore) SetRoleAndTeam(_ context.Context, id string, role user.R
 	f.users[id] = u
 	return nil
 }
+func (f *fakeUserStore) CountLocalUsers(context.Context) (int, error) { return 0, nil }
+func (f *fakeUserStore) EnsureLocalAdmin(context.Context, string, string, string, user.Role) error {
+	return nil
+}
+func (f *fakeUserStore) SetPassword(_ context.Context, id string, passwordHash string, mustChange bool) error {
+	u := f.users[id]
+	u.PasswordHash, u.MustChangePassword = passwordHash, mustChange
+	f.users[id] = u
+	return nil
+}
+func (f *fakeUserStore) RecordFailedLogin(context.Context, string, int, *time.Time) error { return nil }
+func (f *fakeUserStore) ResetFailedLogins(context.Context, string) error                  { return nil }
 
 type noAPIKeys struct{}
 
@@ -124,5 +139,53 @@ func TestMiddleware_SessionForDeletedUser_FailsClosed(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for a token whose user no longer exists, got %d", rec.Code)
+	}
+}
+
+// TestRequirePasswordChange_BlocksUntilCleared proves an account with
+// MustChangePassword set is locked out of every route wrapped by it —
+// re-derived fresh from the DB via Middleware on each request, the same
+// as Role/Team above — and that clearing the flag in the "database"
+// immediately unblocks the very next request on the same still-valid
+// token, with no need to log in again.
+func TestRequirePasswordChange_BlocksUntilCleared(t *testing.T) {
+	users := &fakeUserStore{users: map[string]user.User{
+		"u1": {ID: "u1", Email: "admin@local.ssl-manager", Role: user.RoleAdmin, MustChangePassword: true},
+	}}
+	sessions := NewSessionManager("test-secret-not-the-insecure-default", time.Hour)
+	token, err := sessions.Issue(users.users["u1"])
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	reached := false
+	mw := Middleware(sessions, users, noAPIKeys{})(RequirePasswordChange(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})))
+
+	doRequest := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		mw.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := doRequest(); rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 while must_change_password is set, got %d", rec.Code)
+	}
+	if reached {
+		t.Errorf("expected the wrapped handler to never run while must_change_password is set")
+	}
+
+	if err := users.SetPassword(context.Background(), "u1", "some-hash", false); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+	if rec := doRequest(); rec.Code != http.StatusOK {
+		t.Fatalf("expected the same still-valid token to pass through once must_change_password is cleared, got %d", rec.Code)
+	}
+	if !reached {
+		t.Errorf("expected the wrapped handler to run once must_change_password is cleared")
 	}
 }

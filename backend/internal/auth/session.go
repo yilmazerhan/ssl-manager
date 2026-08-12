@@ -17,6 +17,13 @@ type Claims struct {
 	Email string `json:"email"`
 	Role  string `json:"role"`
 	Team  string `json:"team"`
+	// MustChangePassword mirrors user.User.MustChangePassword at the
+	// moment this token was issued. The frontend uses it to gate access
+	// to everything except the change-password screen; the backend's own
+	// enforcement (see rbac.go RequirePasswordChange) re-checks the
+	// database on every request instead of trusting this claim, the same
+	// way Role/Team already work — see rbac_test.go.
+	MustChangePassword bool `json:"must_change_password,omitempty"`
 }
 
 // SessionManager issues the JWT a browser holds after completing OIDC
@@ -42,9 +49,10 @@ func (m *SessionManager) Issue(u user.User) (string, error) {
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(m.ttl)),
 		},
-		Email: u.Email,
-		Role:  string(u.Role),
-		Team:  u.Team,
+		Email:              u.Email,
+		Role:               string(u.Role),
+		Team:               u.Team,
+		MustChangePassword: u.MustChangePassword,
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString(m.secret)
