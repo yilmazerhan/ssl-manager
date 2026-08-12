@@ -36,6 +36,21 @@ type Config struct {
 	ZeroSSLAPIKey  string
 	ZeroSSLBaseURL string
 
+	// SelfSignedValidity is how long a selfsigned-provider certificate is
+	// valid for. It's always available — there's no external account to
+	// configure — unlike every other provider here.
+	SelfSignedValidity time.Duration
+
+	// ADCS* configure the Active Directory Certificate Services provider.
+	// Leaving ADCSBaseURL empty disables it — there's no sensible default
+	// certsrv URL to fall back to.
+	ADCSBaseURL            string
+	ADCSTemplate           string
+	ADCSUsername           string
+	ADCSPassword           string
+	ADCSAllowBasicAuth     bool
+	ADCSInsecureSkipVerify bool
+
 	SessionSecret string
 	SessionTTL    time.Duration
 
@@ -81,6 +96,15 @@ func Load() Config {
 
 		ZeroSSLAPIKey:  getEnv("ZEROSSL_API_KEY", ""),
 		ZeroSSLBaseURL: getEnv("ZEROSSL_BASE_URL", "https://api.zerossl.com"),
+
+		SelfSignedValidity: getDuration("SELFSIGNED_VALIDITY", 365*24*time.Hour),
+
+		ADCSBaseURL:            getEnv("ADCS_BASE_URL", ""),
+		ADCSTemplate:           getEnv("ADCS_TEMPLATE", ""),
+		ADCSUsername:           getEnv("ADCS_USERNAME", ""),
+		ADCSPassword:           getEnv("ADCS_PASSWORD", ""),
+		ADCSAllowBasicAuth:     getBool("ADCS_ALLOW_BASIC_AUTH", false),
+		ADCSInsecureSkipVerify: getBool("ADCS_INSECURE_SKIP_VERIFY", false),
 
 		SessionSecret: getEnv("SESSION_SECRET", "insecure-dev-secret-change-me"),
 		SessionTTL:    getDuration("SESSION_TTL", 12*time.Hour),

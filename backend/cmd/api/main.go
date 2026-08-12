@@ -17,6 +17,7 @@ import (
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/config"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/db"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/discovery"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/downloadtoken"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/notify"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/order"
@@ -56,6 +57,10 @@ func main() {
 	apiKeys := apikey.NewPostgresStore(pool)
 	downloadTokens := downloadtoken.NewPostgresStore(pool)
 	auditStore := audit.NewPostgresStore(pool)
+	discoveryService := discovery.NewService(discovery.NewPostgresStore(pool), certs)
+	if err := discoveryService.RecoverInterruptedScans(ctx); err != nil {
+		log.Printf("discovery: recover interrupted scans: %v", err)
+	}
 
 	dnsAutomation, err := ca.NewDNSAutomation(cfg.DNS01Provider)
 	if err != nil {
@@ -75,19 +80,39 @@ func main() {
 		log.Fatalf("initialize Let's Encrypt client: %v", err)
 	}
 	zeroSSL := ca.NewZeroSSL(ca.ZeroSSLConfig{APIKey: cfg.ZeroSSLAPIKey, BaseURL: cfg.ZeroSSLBaseURL})
-	authorities := ca.Registry(letsEncrypt, zeroSSL)
+	selfSigned := ca.NewSelfSigned(cfg.SelfSignedValidity)
+	authorities := ca.Registry(letsEncrypt, zeroSSL, selfSigned)
+	if cfg.ADCSBaseURL != "" {
+		authorities["adcs"] = ca.NewADCS(ca.ADCSConfig{
+			BaseURL:            cfg.ADCSBaseURL,
+			Template:           cfg.ADCSTemplate,
+			Username:           cfg.ADCSUsername,
+			Password:           cfg.ADCSPassword,
+			AllowBasicAuth:     cfg.ADCSAllowBasicAuth,
+			InsecureSkipVerify: cfg.ADCSInsecureSkipVerify,
+		})
+	} else {
+		log.Println("AD CS is not configured (ADCS_BASE_URL unset) — the adcs certificate authority is unavailable")
+	}
 
 	integrationsStatus := buildIntegrationsStatus(ctx, cfg, accounts, dnsAutomation != nil)
+	integrationsStatus.SelfSigned.Available = true
+	integrationsStatus.SelfSigned.ValidityPeriod = cfg.SelfSignedValidity.String()
+	integrationsStatus.ADCS.Configured = cfg.ADCSBaseURL != ""
+	integrationsStatus.ADCS.BaseURL = cfg.ADCSBaseURL
+	integrationsStatus.ADCS.Template = cfg.ADCSTemplate
 
 	orderService := order.NewService(orders, certs, keyManager, authorities)
 
 	notifier := buildNotifier(cfg)
+	reminderSettings := renewal.NewPostgresSettingsStore(pool)
+	notifyLog := renewal.NewPostgresNotifyLogStore(pool)
 
 	systemUser, err := users.GetOrCreateByOIDCSubject(ctx, "system:renewal-engine", "system@ssl-sentry.local")
 	if err != nil {
 		log.Fatalf("bootstrap system user: %v", err)
 	}
-	renewalEngine := renewal.NewEngine(certs, orderService, auditStore, notifier, renewal.Config{
+	renewalEngine := renewal.NewEngine(certs, orderService, auditStore, notifier, reminderSettings, notifyLog, renewal.Config{
 		Interval:     cfg.RenewalInterval,
 		SystemUserID: systemUser.ID,
 	})
@@ -111,18 +136,21 @@ func main() {
 	}
 
 	router := api.NewRouter(api.Dependencies{
-		Certs:          certs,
-		Orders:         orderService,
-		Renewal:        renewalEngine,
-		Users:          users,
-		Sessions:       sessions,
-		APIKeys:        apiKeys,
-		DownloadTokens: downloadTokens,
-		Audit:          auditStore,
-		OIDC:           oidcHandler,
-		DevAuthEnabled: cfg.DevAuthEnabled,
-		Authorities:    authorities,
-		Integrations:   integrationsStatus,
+		Certs:                certs,
+		Orders:               orderService,
+		Renewal:              renewalEngine,
+		Users:                users,
+		Sessions:             sessions,
+		APIKeys:              apiKeys,
+		DownloadTokens:       downloadTokens,
+		Audit:                auditStore,
+		OIDC:                 oidcHandler,
+		DevAuthEnabled:       cfg.DevAuthEnabled,
+		Authorities:          authorities,
+		Integrations:         integrationsStatus,
+		Discovery:            discoveryService,
+		NotificationSettings: reminderSettings,
+		NotifyLog:            notifyLog,
 	})
 
 	server := &http.Server{Addr: cfg.Addr, Handler: router}

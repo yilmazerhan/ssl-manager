@@ -68,11 +68,59 @@ The full architecture and delivery plan is in [`docs/plan.html`](docs/plan.html)
   already-revoked certificate (`alreadyRevoked`) rather than silently
   succeeding twice.
 - **Admin frontend**: an Integrations page reporting live connection
-  status for each CA and DNS-01 automation, and a Users page for
-  role/team changes and minting API keys.
+  status for each CA and DNS-01 automation, a Users page for role/team
+  changes and minting API keys, a Discovery page, and a Notifications
+  page.
 - **Inventory filters**: team (admin/API-only only — everyone else is
   already scoped to their own team server-side), status, CA provider,
-  and expiring-within-days.
+  and expiring-within-days. Filtered results export to CSV client-side.
+- **Self-signed certificates** (`backend/internal/ca/selfsigned.go`) — a
+  fourth `Authority` alongside Let's Encrypt/ZeroSSL/AD CS: no domain
+  validation, no CA round trip, the leaf is signed by the same
+  Vault-backed key its CSR carries the public half of and is its own
+  trust anchor. Issues instantly (the wizard skips straight to "done"),
+  which makes it the one provider that's fully live-tested in this
+  sandbox with no external dependency at all — see
+  `backend/internal/ca/selfsigned_test.go`.
+- **Active Directory Certificate Services (AD CS)**
+  (`backend/internal/ca/adcs.go`) — enrolls against a Windows CA's
+  certsrv web-enrollment pages (`certfnsh.asp`/`certnew.cer`), the same
+  interface `certreq`/PowerShell's `Get-Certificate` use, with NTLM auth
+  via `github.com/Azure/go-ntlmssp`. Handles both immediate issuance and
+  templates that require a CA administrator's manual approval (polled the
+  same way an unmet HTTP-01 challenge is). Unit-tested against a mock
+  certsrv server (`adcs_test.go`); *not* exercised against a real AD CS
+  server or the NTLM handshake itself, since this environment has no
+  Windows domain to test against. Revocation is refused, honestly —
+  certsrv's web pages have no revoke endpoint; that needs `certutil
+  -revoke` on the CA server itself.
+- **Network discovery** (`backend/internal/discovery`) — scans a bounded
+  set of hosts/CIDRs/ports for live TLS endpoints (a TCP connect + TLS
+  handshake, nothing else — no HTTP requests, no vulnerability probing)
+  and reconciles each one against the certificate inventory: matched,
+  serving a different certificate than what's on file (`mismatched`),
+  or not tracked at all (`not_in_inventory`). Runs in the background per
+  scan with cancel support; every scan is bounded (20,000 expanded
+  targets, 32 ports, 64 workers) so it can't be pointed at an unbounded
+  range. Live-tested against real local TLS listeners
+  (`scanner_test.go`, `service_test.go`) and, in this session, against
+  Pebble's own management ports — which correctly turned up as
+  `mismatched` against a stale inventory record once Pebble had
+  regenerated its certificate on a restart.
+- **Richer expiry-reminder engine** (`backend/internal/renewal`) —
+  threshold days, the email subject/body, and default/escalation
+  recipients are all editable via `GET`/`PUT /notification-settings`
+  (backed by a real Go `text/template`, validated at save time) instead
+  of being hardcoded. A certificate's own distribution list (`POST
+  /certificates/{id}/notify-emails`) overrides the defaults; the most
+  urgent threshold also reaches the escalation list. Every attempt is
+  logged (`notification_log`) so the same certificate+threshold is never
+  notified twice and so there's a history — per certificate and
+  platform-wide — to show an operator.
+- **Reporting/dashboard breadth** — the dashboard now shows real
+  aggregate counts (by status, CA provider, team, and expiry window) from
+  a SQL `GROUP BY`, not an in-memory scan, plus (for admins) discovery
+  mismatches and 30-day notification send/fail counts.
 - **Frontend** (`frontend/`, React + TypeScript + Vite) — dashboard,
   certificate inventory, certificate detail, and the from-scratch
   certificate wizard, now wired to real auth and the download-token flow.
@@ -94,9 +142,15 @@ leaves it").
   (Route 53, etc.) is a few lines in `ca.NewDNSAutomation` — `lego` ships
   providers for most registrars — but only Cloudflare is wired up today.
 - **Live ZeroSSL verification** — see above.
+- **Live AD CS / NTLM verification** — see above; the certsrv protocol
+  handling is real, the NTLM handshake against an actual Windows CA is
+  not exercised here.
 - **Live OIDC verification** — the login flow is a standard, real
   implementation, but this environment has no OIDC tenant to test it
   against end-to-end.
+- **AD CS certificate chains** — `Issue` returns the leaf only; the chain
+  comes back from certsrv as a PKCS#7 blob (`certnew.p7b`) and parsing
+  PKCS#7 isn't worth a new dependency until this is pointed at a real CA.
 
 ## Running it locally
 
@@ -191,3 +245,21 @@ whichever of `CLOUDFLARE_DNS_API_TOKEN` (recommended — scope it to
 Zone:Read + DNS:Edit) or `CLOUDFLARE_EMAIL`/`CLOUDFLARE_API_KEY` your
 account uses. Those are read directly by `lego`'s Cloudflare provider, not
 by this app's own config — see its docs for the full variable list.
+
+To enable AD CS, set `ADCS_BASE_URL` (the certsrv virtual directory, e.g.
+`https://ca.corp.example.com/certsrv`) plus `ADCS_USERNAME`/`ADCS_PASSWORD`
+and, optionally, `ADCS_TEMPLATE`. `ADCS_ALLOW_BASIC_AUTH=true` lets the
+client fall back to HTTP Basic if the server asks for it instead of
+NTLM/Negotiate — only ever set that behind TLS. `SELFSIGNED_VALIDITY`
+(a Go duration, default `8760h`/365 days) controls how long a
+self-signed certificate is valid for; there's nothing else to configure
+for it.
+
+### Network discovery safety bounds
+
+`backend/internal/discovery/scanner.go` hard-caps every scan so it can't
+become a network-hammering tool by accident: at most 20,000 expanded
+targets (a CIDR that would expand past that is rejected outright, not
+silently truncated), 32 ports, and 64 concurrent workers, with timeouts
+clamped to 200ms–30s. These aren't configurable via environment variable
+on purpose — they're safety rails, not tuning knobs.

@@ -2,6 +2,7 @@ package ca
 
 import (
 	"context"
+	"crypto"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -197,7 +198,7 @@ type zerosslDownloadResponse struct {
 	CABundleCrt    string `json:"ca_bundle.crt"`
 }
 
-func (z *ZeroSSL) Issue(ctx context.Context, po ProviderOrder, _ string, _ []string) (IssuedCertificate, error) {
+func (z *ZeroSSL) Issue(ctx context.Context, po ProviderOrder, _ string, _ []string, _ crypto.Signer) (IssuedCertificate, error) {
 	var state zerosslState
 	if err := json.Unmarshal([]byte(po.State), &state); err != nil {
 		return IssuedCertificate{}, fmt.Errorf("zerossl: unmarshal state: %w", err)

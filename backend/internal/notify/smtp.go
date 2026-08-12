@@ -15,16 +15,30 @@ type SMTPSender struct {
 }
 
 func (s *SMTPSender) Send(_ context.Context, e Event) error {
-	subject := fmt.Sprintf("[SSL Sentry] %s: %s", e.Kind, e.CommonName)
-	body := formatMessage(e)
-	msg := fmt.Appendf(nil, "To: %s\r\nSubject: %s\r\n\r\n%s\r\n", joinAddrs(s.To), subject, body)
+	to := e.Recipients
+	if len(to) == 0 {
+		to = s.To
+	}
+	if len(to) == 0 {
+		return nil // nothing configured and no per-event override — not an error, just nowhere to send
+	}
+
+	subject := e.Subject
+	if subject == "" {
+		subject = fmt.Sprintf("[SSL Sentry] %s: %s", e.Kind, e.CommonName)
+	}
+	body := e.Body
+	if body == "" {
+		body = formatMessage(e)
+	}
+	msg := fmt.Appendf(nil, "To: %s\r\nSubject: %s\r\n\r\n%s\r\n", joinAddrs(to), subject, body)
 
 	var auth smtp.Auth
 	if s.Username != "" {
 		auth = smtp.PlainAuth("", s.Username, s.Password, hostOnly(s.Addr))
 	}
 
-	if err := smtp.SendMail(s.Addr, auth, s.From, s.To, msg); err != nil {
+	if err := smtp.SendMail(s.Addr, auth, s.From, to, msg); err != nil {
 		return fmt.Errorf("notify: send email: %w", err)
 	}
 	return nil

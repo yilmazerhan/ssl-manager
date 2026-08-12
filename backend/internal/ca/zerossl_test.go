@@ -112,7 +112,7 @@ func TestZeroSSL_FullFlow(t *testing.T) {
 		t.Fatalf("expected verified after trigger, challenges: %+v", po.Challenges)
 	}
 
-	issued, err := z.Issue(ctx, po, "", nil)
+	issued, err := z.Issue(ctx, po, "", nil, nil)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}

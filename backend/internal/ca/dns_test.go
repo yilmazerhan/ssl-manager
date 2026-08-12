@@ -131,7 +131,7 @@ func TestLetsEncrypt_FullFlow_DNS01_Automated(t *testing.T) {
 		t.Fatalf("expected the automated DNS-01 challenge to verify on the first check, got: %+v", po.Challenges)
 	}
 
-	issued, err := le.Issue(ctx, po, csrPEM, []string{domain})
+	issued, err := le.Issue(ctx, po, csrPEM, []string{domain}, signer)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}

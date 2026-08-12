@@ -99,7 +99,7 @@ func TestLetsEncrypt_FullFlow_HTTP01(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	issued, err := le.Issue(ctx, po, csrPEM, []string{domain})
+	issued, err := le.Issue(ctx, po, csrPEM, []string{domain}, signer)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}

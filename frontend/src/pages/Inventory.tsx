@@ -34,6 +34,27 @@ export default function Inventory() {
 
   const hasActiveFilter = Object.values(filter).some((v) => v !== undefined && v !== "");
 
+  function exportCSV() {
+    const header = ["common_name", "sans", "ca_provider", "status", "not_after", "owning_team", "auto_renew"];
+    const rows = certs.map((c) => [
+      c.common_name,
+      c.sans.join(";"),
+      c.ca_provider,
+      c.status,
+      c.not_after,
+      c.owning_team,
+      String(c.auto_renew),
+    ]);
+    const csv = [header, ...rows].map((r) => r.map((v) => `"${v.replace(/"/g, '""')}"`).join(",")).join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `certificate-inventory-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <>
       <h1>Certificate inventory</h1>
@@ -86,6 +107,9 @@ export default function Inventory() {
             Clear filters
           </button>
         )}
+        <button className="secondary" onClick={exportCSV} disabled={certs.length === 0}>
+          Export CSV
+        </button>
       </div>
 
       {error && <div className="card">Could not reach the API: {error}</div>}

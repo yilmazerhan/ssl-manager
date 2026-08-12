@@ -16,6 +16,7 @@ type Store interface {
 	List(ctx context.Context, filter Filter) ([]Certificate, error)
 	UpdateAfterRenewal(ctx context.Context, id string, notBefore, notAfter time.Time, caReference string) error
 	Revoke(ctx context.Context, id string) error
+	UpdateNotifyEmails(ctx context.Context, id string, emails []string) error
 	// DueForRenewal returns every auto-renewing certificate whose expiry is
 	// within its own renew_before_days window as of asOf.
 	DueForRenewal(ctx context.Context, asOf time.Time) ([]Certificate, error)
@@ -23,6 +24,24 @@ type Store interface {
 	AddVersion(ctx context.Context, v Version) (Version, error)
 	Versions(ctx context.Context, certificateID string) ([]Version, error)
 	LatestVersion(ctx context.Context, certificateID string) (Version, error)
+
+	// Stats aggregates the inventory for the dashboard/reports — real SQL
+	// GROUP BY, not counting an in-memory List() result, so it stays cheap
+	// regardless of inventory size. team scopes every breakdown to one
+	// team's certificates; empty means every team (the admin view).
+	Stats(ctx context.Context, team string) (Stats, error)
+}
+
+// Stats is the certificate inventory's shape for reporting: how many, and
+// how they break down by the dimensions docs/plan.html section 08 (and the
+// RFP's reporting section) call out — status, issuer, and owning team.
+type Stats struct {
+	Total         int            `json:"total"`
+	ByStatus      map[string]int `json:"by_status"`
+	ByCAProvider  map[string]int `json:"by_ca_provider"`
+	ByTeam        map[string]int `json:"by_team"`
+	ExpiringIn7d  int            `json:"expiring_in_7d"`
+	ExpiringIn30d int            `json:"expiring_in_30d"`
 }
 
 type PostgresStore struct {
@@ -40,7 +59,8 @@ func (s *PostgresStore) Create(ctx context.Context, c Certificate) (Certificate,
 			 key_algorithm, key_ref, ca_reference, owning_team, auto_renew, renew_before_days)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING id, common_name, sans, ca_provider, validation_method, status, not_before, not_after,
-			key_algorithm, key_ref, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days, created_at, updated_at
+			key_algorithm, key_ref, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days,
+			coalesce(notify_emails, '{}'), created_at, updated_at
 	`, c.CommonName, c.SANs, c.CAProvider, c.ValidationMethod, c.Status, c.NotBefore, c.NotAfter,
 		c.KeyAlgorithm, c.KeyRef, nullableString(c.CAReference), c.OwningTeam, c.AutoRenew, c.RenewBeforeDays)
 	return scanCertificate(row)
@@ -49,7 +69,8 @@ func (s *PostgresStore) Create(ctx context.Context, c Certificate) (Certificate,
 func (s *PostgresStore) Get(ctx context.Context, id string) (Certificate, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT id, common_name, sans, ca_provider, validation_method, status, not_before, not_after,
-			key_algorithm, key_ref, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days, created_at, updated_at
+			key_algorithm, key_ref, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days,
+			coalesce(notify_emails, '{}'), created_at, updated_at
 		FROM certificate WHERE id = $1
 	`, id)
 	return scanCertificate(row)
@@ -58,7 +79,8 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (Certificate, error)
 func (s *PostgresStore) List(ctx context.Context, filter Filter) ([]Certificate, error) {
 	query := `
 		SELECT id, common_name, sans, ca_provider, validation_method, status, not_before, not_after,
-			key_algorithm, key_ref, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days, created_at, updated_at
+			key_algorithm, key_ref, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days,
+			coalesce(notify_emails, '{}'), created_at, updated_at
 		FROM certificate WHERE 1=1
 	`
 	args := []interface{}{}
@@ -126,10 +148,28 @@ func (s *PostgresStore) Revoke(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *PostgresStore) UpdateNotifyEmails(ctx context.Context, id string, emails []string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE certificate SET notify_emails = $2, updated_at = now() WHERE id = $1
+	`, id, nullableStringSlice(emails))
+	if err != nil {
+		return fmt.Errorf("certificate: update notify emails: %w", err)
+	}
+	return nil
+}
+
+func nullableStringSlice(s []string) interface{} {
+	if len(s) == 0 {
+		return nil
+	}
+	return s
+}
+
 func (s *PostgresStore) DueForRenewal(ctx context.Context, asOf time.Time) ([]Certificate, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, common_name, sans, ca_provider, validation_method, status, not_before, not_after,
-			key_algorithm, key_ref, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days, created_at, updated_at
+			key_algorithm, key_ref, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days,
+			coalesce(notify_emails, '{}'), created_at, updated_at
 		FROM certificate
 		WHERE auto_renew
 		  AND status IN ('active', 'expiring')
@@ -191,6 +231,73 @@ func (s *PostgresStore) LatestVersion(ctx context.Context, certificateID string)
 	return scanVersion(row)
 }
 
+func (s *PostgresStore) Stats(ctx context.Context, team string) (Stats, error) {
+	stats := Stats{ByStatus: map[string]int{}, ByCAProvider: map[string]int{}, ByTeam: map[string]int{}}
+
+	teamFilter := ""
+	args := []interface{}{}
+	if team != "" {
+		args = append(args, team)
+		teamFilter = " WHERE owning_team = $1"
+	}
+
+	if err := s.aggregateInto(ctx, stats.ByStatus, "SELECT status, count(*) FROM certificate"+teamFilter+" GROUP BY status", args...); err != nil {
+		return Stats{}, err
+	}
+	if err := s.aggregateInto(ctx, stats.ByCAProvider, "SELECT ca_provider, count(*) FROM certificate"+teamFilter+" GROUP BY ca_provider", args...); err != nil {
+		return Stats{}, err
+	}
+	// The team breakdown itself only makes sense unscoped (an admin's
+	// all-teams view) — scoping it by team would just be a single row.
+	if team == "" {
+		if err := s.aggregateInto(ctx, stats.ByTeam, "SELECT owning_team, count(*) FROM certificate GROUP BY owning_team"); err != nil {
+			return Stats{}, err
+		}
+	}
+
+	for _, n := range stats.ByStatus {
+		stats.Total += n
+	}
+
+	windowQuery := `
+		SELECT count(*) FROM certificate
+		WHERE status NOT IN ('revoked', 'expired') AND not_after <= now() + make_interval(days => $1)
+	`
+	if team != "" {
+		windowQuery += " AND owning_team = $2"
+	}
+	windowArgs := []interface{}{7}
+	if team != "" {
+		windowArgs = append(windowArgs, team)
+	}
+	if err := s.pool.QueryRow(ctx, windowQuery, windowArgs...).Scan(&stats.ExpiringIn7d); err != nil {
+		return Stats{}, fmt.Errorf("certificate: stats (7d): %w", err)
+	}
+	windowArgs[0] = 30
+	if err := s.pool.QueryRow(ctx, windowQuery, windowArgs...).Scan(&stats.ExpiringIn30d); err != nil {
+		return Stats{}, fmt.Errorf("certificate: stats (30d): %w", err)
+	}
+
+	return stats, nil
+}
+
+func (s *PostgresStore) aggregateInto(ctx context.Context, into map[string]int, query string, args ...interface{}) error {
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("certificate: stats query: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var count int
+		if err := rows.Scan(&key, &count); err != nil {
+			return fmt.Errorf("certificate: stats scan: %w", err)
+		}
+		into[key] = count
+	}
+	return rows.Err()
+}
+
 type rowScanner interface {
 	Scan(dest ...interface{}) error
 }
@@ -198,7 +305,8 @@ type rowScanner interface {
 func scanCertificate(row rowScanner) (Certificate, error) {
 	var c Certificate
 	err := row.Scan(&c.ID, &c.CommonName, &c.SANs, &c.CAProvider, &c.ValidationMethod, &c.Status, &c.NotBefore, &c.NotAfter,
-		&c.KeyAlgorithm, &c.KeyRef, &c.CAReference, &c.OwningTeam, &c.AutoRenew, &c.RenewBeforeDays, &c.CreatedAt, &c.UpdatedAt)
+		&c.KeyAlgorithm, &c.KeyRef, &c.CAReference, &c.OwningTeam, &c.AutoRenew, &c.RenewBeforeDays,
+		&c.NotifyEmails, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Certificate{}, ErrNotFound

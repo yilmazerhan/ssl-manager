@@ -23,6 +23,8 @@ const VALIDATION_METHODS: Record<string, { value: string; label: string }[]> = {
     { value: "http-file", label: "HTTP file check" },
     { value: "cname", label: "CNAME record" },
   ],
+  selfsigned: [{ value: "none", label: "None — issued instantly, trusted only by this platform" }],
+  adcs: [{ value: "adcs-enroll", label: "AD CS enrollment (certsrv)" }],
 };
 
 export default function NewCertificateWizard() {
@@ -52,6 +54,21 @@ export default function NewCertificateWizard() {
         ca_provider: caProvider,
         validation_method: validationMethod,
       });
+      // "none" (selfsigned) has nothing for anyone to publish or approve —
+      // it's already verified at creation time, so skip straight to
+      // issuing instead of showing an empty "prove you control" screen.
+      if (validationMethod === "none") {
+        const validated = await api.validateOrder(created.id);
+        setOrder(validated);
+        if (validated.status === "issued") {
+          setStep("done");
+          return;
+        }
+        if (validated.status === "failed") {
+          setError(validated.error ?? "issuance failed");
+          return;
+        }
+      }
       setOrder(created);
       setStep("challenge");
     } catch (e) {
@@ -133,6 +150,8 @@ export default function NewCertificateWizard() {
             >
               <option value="letsencrypt">Let's Encrypt — free, 90-day certs</option>
               <option value="zerossl">ZeroSSL — free tier, paid multi-year available</option>
+              <option value="selfsigned">Self-signed — instant, trusted only by this platform</option>
+              <option value="adcs">Active Directory CS — issued by your internal Domain Controller CA</option>
             </select>
           </div>
           <button className="secondary" onClick={() => setStep("domains")} style={{ marginRight: 8 }}>
@@ -193,14 +212,28 @@ export default function NewCertificateWizard() {
 
       {step === "challenge" && challenges.length > 0 && (
         <div className="card">
-          <p>Prove you control {challenges.length === 1 ? "this domain" : "these domains"} by publishing the following before checking again:</p>
+          {challenges.every((c) => c.automated) ? (
+            <p>
+              Nothing to publish yourself — {caProvider === "adcs" ? "your AD CS server" : "this provider"} handles validation automatically. If a
+              certificate template requires manager approval, approve the pending request in the CA's console, then check again.
+            </p>
+          ) : (
+            <p>Prove you control {challenges.length === 1 ? "this domain" : "these domains"} by publishing the following before checking again:</p>
+          )}
           {challenges.map((c) => (
             <div key={c.domain} style={{ marginBottom: 12 }}>
               <p style={{ fontSize: 13, color: "var(--muted)", marginBottom: 4 }}>
                 {c.domain} · {c.type} {c.verified ? "· verified" : ""}
               </p>
-              <code className="challenge-value">{c.resource_name}</code>
-              <code className="challenge-value">{c.value}</code>
+              {c.error && <p style={{ fontSize: 13, color: "var(--danger, #c0392b)", marginBottom: 4 }}>{c.error}</p>}
+              {c.automated ? (
+                c.resource_name && <p style={{ fontSize: 13, color: "var(--muted)" }}>{c.resource_name}</p>
+              ) : (
+                <>
+                  <code className="challenge-value">{c.resource_name}</code>
+                  <code className="challenge-value">{c.value}</code>
+                </>
+              )}
             </div>
           ))}
           <button className="primary" onClick={checkNow} disabled={checking}>

@@ -82,14 +82,27 @@ tr:last-child td { border-bottom: none; }
 
 .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; max-width: 420px; }
 .field label { font-size: 13px; color: var(--muted); }
-.field input, .field select {
+.field input, .field select, .field textarea {
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
+  font-family: inherit;
 }
+
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.stat-tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.stat-tile .stat-value { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.stat-tile .stat-label { font-size: 12.5px; color: var(--muted); margin-top: 4px; }
+.stat-tile.ok .stat-value { color: var(--ok); }
+.stat-tile.warn .stat-value { color: var(--warn); }
+.stat-tile.critical .stat-value { color: var(--critical); }
+
+.breakdown-list { display: flex; flex-direction: column; gap: 8px; }
+.breakdown-row { display: flex; justify-content: space-between; font-size: 14px; }
+.breakdown-row .breakdown-count { font-variant-numeric: tabular-nums; color: var(--muted); }
 
 button.primary {
   background: var(--accent);

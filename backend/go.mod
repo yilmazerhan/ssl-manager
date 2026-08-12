@@ -3,6 +3,7 @@ module github.com/yilmazerhan/ssl-manager/backend
 go 1.25.0
 
 require (
+	github.com/Azure/go-ntlmssp v0.1.1
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/go-acme/lego/v4 v4.35.2
 	github.com/golang-jwt/jwt/v5 v5.3.1

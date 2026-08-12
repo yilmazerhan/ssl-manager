@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/yilmazerhan/ssl-manager/backend/internal/audit"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/auth"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/discovery"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/downloadtoken"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/order"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/renewal"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/user"
 )
 
@@ -244,6 +247,181 @@ func (h *handlers) validateOrder(w http.ResponseWriter, r *http.Request) {
 		h.audit(r, "issued", "certificate", o.CertificateID, string(auth.ScopeCertsIssue), map[string]interface{}{"order_id": o.ID})
 	}
 	writeJSON(w, http.StatusOK, o.Public())
+}
+
+func (h *handlers) createDiscoveryScan(w http.ResponseWriter, r *http.Request) {
+	identity, _ := auth.IdentityFromContext(r.Context())
+
+	var req discovery.CreateScanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	sc, err := h.deps.Discovery.CreateScan(r.Context(), req, identity.UserID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.audit(r, "discovery_scan_started", "discovery_scan", sc.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{
+		"targets": req.Targets, "ports": sc.Ports, "total_targets": sc.TotalTargets,
+	})
+	writeJSON(w, http.StatusCreated, sc)
+}
+
+func (h *handlers) listDiscoveryScans(w http.ResponseWriter, r *http.Request) {
+	scans, err := h.deps.Discovery.ListScans(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list scans")
+		return
+	}
+	writeJSON(w, http.StatusOK, scans)
+}
+
+func (h *handlers) getDiscoveryScan(w http.ResponseWriter, r *http.Request) {
+	sc, err := h.deps.Discovery.GetScan(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "scan not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, sc)
+}
+
+func (h *handlers) listDiscoveryResults(w http.ResponseWriter, r *http.Request) {
+	results, err := h.deps.Discovery.ListResults(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list scan results")
+		return
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+func (h *handlers) cancelDiscoveryScan(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.deps.Discovery.CancelScan(r.Context(), id); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	h.audit(r, "discovery_scan_canceled", "discovery_scan", id, string(auth.ScopeCertsAdmin), nil)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "canceling"})
+}
+
+func (h *handlers) getNotificationSettings(w http.ResponseWriter, r *http.Request) {
+	settings, err := h.deps.NotificationSettings.Get(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load notification settings")
+		return
+	}
+	writeJSON(w, http.StatusOK, settings)
+}
+
+func (h *handlers) updateNotificationSettings(w http.ResponseWriter, r *http.Request) {
+	var req renewal.ReminderSettings
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(req.ThresholdDays) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one threshold day is required")
+		return
+	}
+	if err := renewal.ValidateTemplates(req.EmailSubjectTemplate, req.EmailBodyTemplate); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid template: "+err.Error())
+		return
+	}
+	if err := h.deps.NotificationSettings.Update(r.Context(), req); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not update notification settings")
+		return
+	}
+	h.audit(r, "notification_settings_updated", "notification_settings", "1", string(auth.ScopeCertsAdmin), nil)
+	writeJSON(w, http.StatusOK, req)
+}
+
+func (h *handlers) listRecentNotifications(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	entries, err := h.deps.NotifyLog.Recent(r.Context(), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list notifications")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+func (h *handlers) certificateNotifications(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	entries, err := h.deps.NotifyLog.ForCertificate(r.Context(), cert.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list notifications for this certificate")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+func (h *handlers) updateCertificateNotifyEmails(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Emails []string `json:"emails"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.deps.Certs.UpdateNotifyEmails(r.Context(), cert.ID, req.Emails); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not update notification emails")
+		return
+	}
+	h.audit(r, "notify_emails_updated", "certificate", cert.ID, string(auth.ScopeCertsIssue), map[string]interface{}{"emails": req.Emails})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// summaryReport is the dashboard/reports payload. Discovery and
+// notification breakdowns are admin-only concerns (the same scope that
+// gates the Discovery and Notifications pages themselves), so they're left
+// nil for a team-scoped viewer rather than leaking cross-team activity.
+type summaryReport struct {
+	Certificates           certificate.Stats  `json:"certificates"`
+	DiscoveryMismatches    []discovery.Result `json:"discovery_mismatches,omitempty"`
+	NotificationsSent30d   int                `json:"notifications_sent_30d,omitempty"`
+	NotificationsFailed30d int                `json:"notifications_failed_30d,omitempty"`
+}
+
+func (h *handlers) getSummaryReport(w http.ResponseWriter, r *http.Request) {
+	identity, _ := auth.IdentityFromContext(r.Context())
+
+	team := identity.Team
+	if identity.Role == user.RoleAdmin || identity.Role == user.RoleAPIOnly {
+		team = ""
+	}
+
+	stats, err := h.deps.Certs.Stats(r.Context(), team)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load certificate statistics")
+		return
+	}
+	report := summaryReport{Certificates: stats}
+
+	if team == "" {
+		if mismatches, err := h.deps.Discovery.ListMismatches(r.Context(), 50); err == nil {
+			report.DiscoveryMismatches = mismatches
+		}
+		if sent, failed, err := h.deps.NotifyLog.Stats(r.Context(), time.Now().Add(-30*24*time.Hour)); err == nil {
+			report.NotificationsSent30d = sent
+			report.NotificationsFailed30d = failed
+		}
+	}
+
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (h *handlers) listUsers(w http.ResponseWriter, r *http.Request) {

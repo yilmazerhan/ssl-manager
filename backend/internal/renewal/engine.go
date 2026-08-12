@@ -17,10 +17,6 @@ import (
 	"github.com/yilmazerhan/ssl-manager/backend/internal/order"
 )
 
-// ReminderThresholds mirrors the escalation schedule in docs/plan.html
-// section 10.
-var ReminderThresholds = []int{30, 14, 7, 1}
-
 type Config struct {
 	Interval           time.Duration
 	ValidateAttempts   int
@@ -42,15 +38,21 @@ func (c Config) withDefaults() Config {
 }
 
 type Engine struct {
-	certs    certificate.Store
-	orders   *order.Service
-	audit    audit.Store
-	notifier notify.Sender
-	cfg      Config
+	certs     certificate.Store
+	orders    *order.Service
+	audit     audit.Store
+	notifier  notify.Sender
+	settings  SettingsStore
+	notifyLog NotifyLogStore
+	cfg       Config
 }
 
-func NewEngine(certs certificate.Store, orders *order.Service, auditStore audit.Store, notifier notify.Sender, cfg Config) *Engine {
-	return &Engine{certs: certs, orders: orders, audit: auditStore, notifier: notifier, cfg: cfg.withDefaults()}
+func NewEngine(certs certificate.Store, orders *order.Service, auditStore audit.Store, notifier notify.Sender,
+	settings SettingsStore, notifyLog NotifyLogStore, cfg Config) *Engine {
+	return &Engine{
+		certs: certs, orders: orders, audit: auditStore, notifier: notifier,
+		settings: settings, notifyLog: notifyLog, cfg: cfg.withDefaults(),
+	}
 }
 
 // Run blocks, ticking immediately and then on cfg.Interval, until ctx is
@@ -151,10 +153,22 @@ func (e *Engine) reportFailure(ctx context.Context, cert certificate.Certificate
 }
 
 func (e *Engine) sendExpiryReminders(ctx context.Context) {
-	maxThreshold := 0
-	for _, d := range ReminderThresholds {
+	settings, err := e.settings.Get(ctx)
+	if err != nil {
+		log.Printf("renewal: load notification settings: %v", err)
+		return
+	}
+	if len(settings.ThresholdDays) == 0 {
+		return
+	}
+
+	maxThreshold, minThreshold := settings.ThresholdDays[0], settings.ThresholdDays[0]
+	for _, d := range settings.ThresholdDays {
 		if d > maxThreshold {
 			maxThreshold = d
+		}
+		if d < minThreshold {
+			minThreshold = d
 		}
 	}
 
@@ -166,16 +180,51 @@ func (e *Engine) sendExpiryReminders(ctx context.Context) {
 
 	for _, cert := range certs {
 		daysRemaining := int(time.Until(cert.NotAfter).Hours() / 24)
-		for _, threshold := range ReminderThresholds {
+		for _, threshold := range settings.ThresholdDays {
 			if daysRemaining != threshold {
 				continue
 			}
-			if err := e.notifier.Send(ctx, notify.Event{
-				Kind: notify.KindExpiryReminder, CertificateID: cert.ID,
-				CommonName: cert.CommonName, OwningTeam: cert.OwningTeam, DaysRemaining: daysRemaining,
-			}); err != nil {
-				log.Printf("renewal: send expiry reminder for %s: %v", cert.ID, err)
-			}
+			e.sendOneReminder(ctx, cert, threshold, threshold == minThreshold, settings)
 		}
+	}
+}
+
+func (e *Engine) sendOneReminder(ctx context.Context, cert certificate.Certificate, threshold int, escalate bool, settings ReminderSettings) {
+	alreadySent, err := e.notifyLog.HasSent(ctx, cert.ID, threshold)
+	if err != nil {
+		log.Printf("renewal: check notification log for %s: %v", cert.ID, err)
+		return
+	}
+	if alreadySent {
+		return
+	}
+
+	recipients := settings.DefaultRecipients
+	if len(cert.NotifyEmails) > 0 {
+		recipients = cert.NotifyEmails
+	}
+	if escalate {
+		recipients = append(append([]string{}, recipients...), settings.EscalationRecipients...)
+	}
+
+	subject, body, err := renderReminder(settings.EmailSubjectTemplate, settings.EmailBodyTemplate, cert, threshold)
+	if err != nil {
+		log.Printf("renewal: render expiry reminder for %s: %v", cert.ID, err)
+		return
+	}
+
+	sendErr := e.notifier.Send(ctx, notify.Event{
+		Kind: notify.KindExpiryReminder, CertificateID: cert.ID, CommonName: cert.CommonName,
+		OwningTeam: cert.OwningTeam, DaysRemaining: threshold, Subject: subject, Body: body, Recipients: recipients,
+	})
+
+	entry := NotificationLogEntry{CertificateID: cert.ID, ThresholdDays: threshold, Status: "sent", Recipients: recipients}
+	if sendErr != nil {
+		entry.Status = "failed"
+		entry.Error = sendErr.Error()
+		log.Printf("renewal: send expiry reminder for %s: %v", cert.ID, sendErr)
+	}
+	if err := e.notifyLog.Record(ctx, entry); err != nil {
+		log.Printf("renewal: record notification log for %s: %v", cert.ID, err)
 	}
 }

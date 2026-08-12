@@ -11,6 +11,7 @@ export interface Certificate {
   owning_team: string;
   auto_renew: boolean;
   renew_before_days: number;
+  notify_emails?: string[];
   created_at: string;
   updated_at: string;
 }
@@ -32,6 +33,7 @@ export interface Challenge {
   value: string;
   verified: boolean;
   error?: string;
+  automated?: boolean;
 }
 
 export interface CertificateOrder {
@@ -98,6 +100,99 @@ export interface IntegrationsStatus {
     provider: string;
     configured: boolean;
   };
+  selfsigned: {
+    available: boolean;
+    validity_period: string;
+  };
+  adcs: {
+    configured: boolean;
+    base_url: string;
+    template: string;
+  };
+}
+
+export interface DiscoveryScan {
+  id: string;
+  name: string;
+  description: string;
+  targets: string[];
+  ports: number[];
+  timeout_ms: number;
+  concurrency: number;
+  status: "pending" | "running" | "completed" | "partially_completed" | "failed" | "canceled";
+  created_by: string;
+  total_targets: number;
+  scanned_count: number;
+  matched_count: number;
+  mismatch_count: number;
+  new_count: number;
+  error?: string;
+  created_at: string;
+  started_at?: string;
+  completed_at?: string;
+}
+
+export interface DiscoveryResult {
+  id: string;
+  scan_id: string;
+  host: string;
+  port: number;
+  reachable: boolean;
+  tls_version?: string;
+  common_name?: string;
+  sans?: string[];
+  issuer?: string;
+  serial_number?: string;
+  fingerprint_sha256?: string;
+  not_before?: string;
+  not_after?: string;
+  match_status: "matched" | "mismatched" | "not_in_inventory" | "no_tls" | "unreachable";
+  matched_certificate_id?: string;
+  error?: string;
+  discovered_at: string;
+}
+
+export interface CreateScanRequest {
+  name: string;
+  description?: string;
+  targets: string[];
+  ports?: number[];
+  timeout_ms?: number;
+  concurrency?: number;
+}
+
+export interface Stats {
+  total: number;
+  by_status: Record<string, number>;
+  by_ca_provider: Record<string, number>;
+  by_team: Record<string, number>;
+  expiring_in_7d: number;
+  expiring_in_30d: number;
+}
+
+export interface SummaryReport {
+  certificates: Stats;
+  discovery_mismatches?: DiscoveryResult[];
+  notifications_sent_30d?: number;
+  notifications_failed_30d?: number;
+}
+
+export interface ReminderSettings {
+  threshold_days: number[];
+  email_subject_template: string;
+  email_body_template: string;
+  default_recipients: string[];
+  escalation_recipients: string[];
+}
+
+export interface NotificationLogEntry {
+  id: string;
+  certificate_id: string;
+  threshold_days: number;
+  sent_at: string;
+  status: "sent" | "failed";
+  error?: string;
+  recipients: string[];
 }
 
 const TOKEN_KEY = "ssl-sentry.token";
@@ -166,6 +261,21 @@ export const api = {
     request<{ key: string }>(`/users/${id}/api-keys`, { method: "POST", body: JSON.stringify({ name, scopes }) }),
 
   getIntegrations: () => request<IntegrationsStatus>("/integrations"),
+  getSummaryReport: () => request<SummaryReport>("/reports/summary"),
+
+  createScan: (body: CreateScanRequest) => request<DiscoveryScan>("/discovery/scans", { method: "POST", body: JSON.stringify(body) }),
+  listScans: () => request<DiscoveryScan[]>("/discovery/scans"),
+  getScan: (id: string) => request<DiscoveryScan>(`/discovery/scans/${id}`),
+  listScanResults: (id: string) => request<DiscoveryResult[]>(`/discovery/scans/${id}/results`),
+  cancelScan: (id: string) => request<{ status: string }>(`/discovery/scans/${id}/cancel`, { method: "POST" }),
+
+  getNotificationSettings: () => request<ReminderSettings>("/notification-settings"),
+  updateNotificationSettings: (s: ReminderSettings) =>
+    request<ReminderSettings>("/notification-settings", { method: "PUT", body: JSON.stringify(s) }),
+  listRecentNotifications: (limit = 50) => request<NotificationLogEntry[]>(`/notifications?limit=${limit}`),
+  getCertificateNotifications: (id: string) => request<NotificationLogEntry[]>(`/certificates/${id}/notifications`),
+  updateNotifyEmails: (id: string, emails: string[]) =>
+    request<{ status: string }>(`/certificates/${id}/notify-emails`, { method: "POST", body: JSON.stringify({ emails }) }),
 
   devLogin: (email: string, role: string, team: string) =>
     fetch("/auth/dev-login", {

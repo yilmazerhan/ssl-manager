@@ -14,6 +14,7 @@ package ca
 
 import (
 	"context"
+	"crypto"
 	"time"
 )
 
@@ -81,8 +82,12 @@ type Authority interface {
 	// challenge in po, returning po with Verified flags (and State) updated.
 	// An unmet challenge is not an error — it's po.AllVerified() == false.
 	CheckChallenge(ctx context.Context, po ProviderOrder) (ProviderOrder, error)
-	// Issue submits csrPEM once every challenge in po is verified.
-	Issue(ctx context.Context, po ProviderOrder, csrPEM string, domains []string) (IssuedCertificate, error)
+	// Issue submits csrPEM once every challenge in po is verified. signer is
+	// the Vault-backed key the CSR was built with — every real CA ignores
+	// it and works from csrPEM alone, but a provider that signs locally
+	// (selfsigned) has no CA round trip to get a certificate from and needs
+	// it to produce one.
+	Issue(ctx context.Context, po ProviderOrder, csrPEM string, domains []string, signer crypto.Signer) (IssuedCertificate, error)
 	// Revoke tells the CA a previously issued certificate should no
 	// longer be trusted. certPEM is the leaf certificate; caReference is
 	// whatever Issue returned as IssuedCertificate.CAReference for it.

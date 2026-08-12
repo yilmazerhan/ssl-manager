@@ -11,6 +11,7 @@ import (
 	"github.com/yilmazerhan/ssl-manager/backend/internal/auth"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/ca"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/discovery"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/downloadtoken"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/order"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/renewal"
@@ -18,18 +19,21 @@ import (
 )
 
 type Dependencies struct {
-	Certs          certificate.Store
-	Orders         *order.Service
-	Renewal        *renewal.Engine
-	Users          user.Store
-	Sessions       *auth.SessionManager
-	APIKeys        apikey.Store
-	DownloadTokens downloadtoken.Store
-	Audit          audit.Store
-	OIDC           *auth.OIDCHandler // nil if OIDC isn't configured
-	DevAuthEnabled bool
-	Authorities    map[string]ca.Authority
-	Integrations   IntegrationsStatus
+	Certs                certificate.Store
+	Orders               *order.Service
+	Renewal              *renewal.Engine
+	Users                user.Store
+	Sessions             *auth.SessionManager
+	APIKeys              apikey.Store
+	DownloadTokens       downloadtoken.Store
+	Audit                audit.Store
+	OIDC                 *auth.OIDCHandler // nil if OIDC isn't configured
+	DevAuthEnabled       bool
+	Authorities          map[string]ca.Authority
+	Integrations         IntegrationsStatus
+	Discovery            *discovery.Service
+	NotificationSettings renewal.SettingsStore
+	NotifyLog            renewal.NotifyLogStore
 }
 
 // IntegrationsStatus is a point-in-time snapshot of how the CA/DNS
@@ -51,6 +55,15 @@ type IntegrationsStatus struct {
 		Provider   string `json:"provider"`
 		Configured bool   `json:"configured"`
 	} `json:"dns01"`
+	SelfSigned struct {
+		Available      bool   `json:"available"`
+		ValidityPeriod string `json:"validity_period"`
+	} `json:"selfsigned"`
+	ADCS struct {
+		Configured bool   `json:"configured"`
+		BaseURL    string `json:"base_url"`
+		Template   string `json:"template"`
+	} `json:"adcs"`
 }
 
 func NewRouter(deps Dependencies) http.Handler {
@@ -83,6 +96,20 @@ func NewRouter(deps Dependencies) http.Handler {
 	mux.Handle("POST /api/v1/certificate-orders/{id}/validate", authed(auth.RequireScope(auth.ScopeCertsIssue)(http.HandlerFunc(h.validateOrder))))
 
 	mux.Handle("GET /api/v1/integrations", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.getIntegrations))))
+
+	mux.Handle("POST /api/v1/discovery/scans", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.createDiscoveryScan))))
+	mux.Handle("GET /api/v1/discovery/scans", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.listDiscoveryScans))))
+	mux.Handle("GET /api/v1/discovery/scans/{id}", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.getDiscoveryScan))))
+	mux.Handle("GET /api/v1/discovery/scans/{id}/results", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.listDiscoveryResults))))
+	mux.Handle("POST /api/v1/discovery/scans/{id}/cancel", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.cancelDiscoveryScan))))
+
+	mux.Handle("GET /api/v1/notification-settings", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.getNotificationSettings))))
+	mux.Handle("PUT /api/v1/notification-settings", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.updateNotificationSettings))))
+	mux.Handle("GET /api/v1/notifications", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.listRecentNotifications))))
+	mux.Handle("GET /api/v1/certificates/{id}/notifications", authed(auth.RequireScope(auth.ScopeCertsRead)(http.HandlerFunc(h.certificateNotifications))))
+	mux.Handle("POST /api/v1/certificates/{id}/notify-emails", authed(auth.RequireScope(auth.ScopeCertsIssue)(http.HandlerFunc(h.updateCertificateNotifyEmails))))
+
+	mux.Handle("GET /api/v1/reports/summary", authed(auth.RequireScope(auth.ScopeCertsRead)(http.HandlerFunc(h.getSummaryReport))))
 
 	mux.Handle("GET /api/v1/users", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.listUsers))))
 	mux.Handle("POST /api/v1/users/{id}/role", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.setUserRole))))

@@ -153,7 +153,11 @@ func (s *Service) Validate(ctx context.Context, id string) (Order, error) {
 		return Order{}, err
 	}
 
-	issued, err := authority.Issue(ctx, po, o.CSRPEM, o.Domains)
+	signer, err := s.keys.Signer(ctx, o.KeyRef)
+	if err != nil {
+		return s.fail(ctx, o, fmt.Sprintf("load signing key: %v", err))
+	}
+	issued, err := authority.Issue(ctx, po, o.CSRPEM, o.Domains, signer)
 	if err != nil {
 		return s.fail(ctx, o, fmt.Sprintf("issue certificate: %v", err))
 	}

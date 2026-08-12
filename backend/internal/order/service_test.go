@@ -102,7 +102,7 @@ func (a *fakeInstantAuthority) CheckChallenge(_ context.Context, po ca.ProviderO
 	return po, nil
 }
 
-func (a *fakeInstantAuthority) Issue(_ context.Context, _ ca.ProviderOrder, _ string, domains []string) (ca.IssuedCertificate, error) {
+func (a *fakeInstantAuthority) Issue(_ context.Context, _ ca.ProviderOrder, _ string, domains []string, _ crypto.Signer) (ca.IssuedCertificate, error) {
 	return ca.IssuedCertificate{
 		PEMCert: "fake-cert", PEMChain: "fake-chain", SerialNumber: "42", FingerprintSHA256: "deadbeef",
 	}, nil

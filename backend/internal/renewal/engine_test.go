@@ -62,6 +62,22 @@ func (f *fakeCertStore) List(_ context.Context, filter certificate.Filter) ([]ce
 	return out, nil
 }
 
+func (f *fakeCertStore) Stats(_ context.Context, team string) (certificate.Stats, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	stats := certificate.Stats{ByStatus: map[string]int{}, ByCAProvider: map[string]int{}, ByTeam: map[string]int{}}
+	for _, c := range f.certs {
+		if team != "" && c.OwningTeam != team {
+			continue
+		}
+		stats.Total++
+		stats.ByStatus[string(c.Status)]++
+		stats.ByCAProvider[c.CAProvider]++
+		stats.ByTeam[c.OwningTeam]++
+	}
+	return stats, nil
+}
+
 func (f *fakeCertStore) UpdateAfterRenewal(_ context.Context, id string, notBefore, notAfter time.Time, caReference string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -70,6 +86,18 @@ func (f *fakeCertStore) UpdateAfterRenewal(_ context.Context, id string, notBefo
 		return certificate.ErrNotFound
 	}
 	c.NotBefore, c.NotAfter, c.Status, c.CAReference = notBefore, notAfter, certificate.StatusActive, caReference
+	f.certs[id] = c
+	return nil
+}
+
+func (f *fakeCertStore) UpdateNotifyEmails(_ context.Context, id string, emails []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.certs[id]
+	if !ok {
+		return certificate.ErrNotFound
+	}
+	c.NotifyEmails = emails
 	f.certs[id] = c
 	return nil
 }
@@ -195,7 +223,7 @@ func (a *instantAuthority) CheckChallenge(_ context.Context, po ca.ProviderOrder
 	return po, nil
 }
 
-func (a *instantAuthority) Issue(_ context.Context, _ ca.ProviderOrder, _ string, domains []string) (ca.IssuedCertificate, error) {
+func (a *instantAuthority) Issue(_ context.Context, _ ca.ProviderOrder, _ string, domains []string, _ crypto.Signer) (ca.IssuedCertificate, error) {
 	if a.failIssue {
 		return ca.IssuedCertificate{}, errors.New("simulated CA outage")
 	}
@@ -226,13 +254,99 @@ func (f *fakeAuditStore) ForResource(context.Context, string, string) ([]audit.R
 type fakeNotifier struct {
 	mu     sync.Mutex
 	events []notify.Event
+	fail   bool
 }
 
 func (f *fakeNotifier) Send(_ context.Context, e notify.Event) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.events = append(f.events, e)
+	if f.fail {
+		return errors.New("simulated notifier outage")
+	}
 	return nil
+}
+
+// fakeSettingsStore is an in-memory ReminderSettings — the real store is
+// separately covered by settings_test.go's Postgres round trip.
+type fakeSettingsStore struct {
+	settings ReminderSettings
+}
+
+func newFakeSettingsStore(thresholds ...int) *fakeSettingsStore {
+	return &fakeSettingsStore{settings: ReminderSettings{
+		ThresholdDays:        thresholds,
+		EmailSubjectTemplate: "{{.CommonName}} expires in {{.DaysRemaining}}d",
+		EmailBodyTemplate:    "{{.CommonName}} ({{.OwningTeam}}) expires {{.NotAfter}}",
+	}}
+}
+
+func (f *fakeSettingsStore) Get(context.Context) (ReminderSettings, error) { return f.settings, nil }
+func (f *fakeSettingsStore) Update(_ context.Context, s ReminderSettings) error {
+	f.settings = s
+	return nil
+}
+
+// fakeNotifyLogStore is an in-memory NotifyLogStore.
+type fakeNotifyLogStore struct {
+	mu      sync.Mutex
+	entries []NotificationLogEntry
+}
+
+func (f *fakeNotifyLogStore) HasSent(_ context.Context, certificateID string, thresholdDays int) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, e := range f.entries {
+		if e.CertificateID == certificateID && e.ThresholdDays == thresholdDays && e.Status == "sent" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeNotifyLogStore) Record(_ context.Context, entry NotificationLogEntry) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if entry.SentAt.IsZero() {
+		entry.SentAt = time.Now()
+	}
+	f.entries = append(f.entries, entry)
+	return nil
+}
+
+func (f *fakeNotifyLogStore) ForCertificate(_ context.Context, certificateID string) ([]NotificationLogEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []NotificationLogEntry
+	for _, e := range f.entries {
+		if e.CertificateID == certificateID {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeNotifyLogStore) Recent(_ context.Context, limit int) ([]NotificationLogEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]NotificationLogEntry{}, f.entries...), nil
+}
+
+func (f *fakeNotifyLogStore) Stats(_ context.Context, since time.Time) (sent, failed int, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, e := range f.entries {
+		if e.SentAt.Before(since) {
+			continue
+		}
+		switch e.Status {
+		case "sent":
+			sent++
+		case "failed":
+			failed++
+		}
+	}
+	return sent, failed, nil
 }
 
 // --- tests ---
@@ -253,7 +367,7 @@ func TestEngine_RenewsExpiringCertificate(t *testing.T) {
 		NotBefore: time.Now().Add(-60 * 24 * time.Hour), NotAfter: time.Now().Add(10 * 24 * time.Hour),
 	})
 
-	engine := NewEngine(certs, orderSvc, auditStore, notifier, Config{ValidateAttempts: 1})
+	engine := NewEngine(certs, orderSvc, auditStore, notifier, newFakeSettingsStore(30, 15, 7, 1), &fakeNotifyLogStore{}, Config{ValidateAttempts: 1})
 	engine.Tick(context.Background())
 
 	renewed, err := certs.Get(context.Background(), created.ID)
@@ -291,7 +405,7 @@ func TestEngine_ReportsRenewalFailure(t *testing.T) {
 		NotBefore: time.Now().Add(-60 * 24 * time.Hour), NotAfter: time.Now().Add(5 * 24 * time.Hour),
 	})
 
-	engine := NewEngine(certs, orderSvc, auditStore, notifier, Config{ValidateAttempts: 1, ValidateRetryDelay: time.Millisecond})
+	engine := NewEngine(certs, orderSvc, auditStore, notifier, newFakeSettingsStore(30, 15, 7, 1), &fakeNotifyLogStore{}, Config{ValidateAttempts: 1, ValidateRetryDelay: time.Millisecond})
 	engine.Tick(context.Background())
 
 	found := false
@@ -319,11 +433,70 @@ func TestEngine_DoesNotRenewCertificateNotYetDue(t *testing.T) {
 		NotBefore: time.Now(), NotAfter: time.Now().Add(89 * 24 * time.Hour),
 	})
 
-	engine := NewEngine(certs, orderSvc, &fakeAuditStore{}, &fakeNotifier{}, Config{ValidateAttempts: 1})
+	engine := NewEngine(certs, orderSvc, &fakeAuditStore{}, &fakeNotifier{}, newFakeSettingsStore(30, 15, 7, 1), &fakeNotifyLogStore{}, Config{ValidateAttempts: 1})
 	engine.Tick(context.Background())
 
 	untouched, _ := certs.Get(context.Background(), created.ID)
 	if !untouched.NotAfter.Equal(created.NotAfter) {
 		t.Errorf("expected NotAfter to be unchanged, got %v (was %v)", untouched.NotAfter, created.NotAfter)
+	}
+}
+
+func TestEngine_SendsTemplatedExpiryReminder_WithEscalationAndDedupe(t *testing.T) {
+	certs := newFakeCertStore()
+	orders := newFakeOrderStore()
+	authorities := ca.Registry(&instantAuthority{})
+	orderSvc := order.NewService(orders, certs, newFakeKeyManager(), authorities)
+	notifier := &fakeNotifier{}
+	notifyLog := &fakeNotifyLogStore{}
+	settings := newFakeSettingsStore(30, 15, 7, 1)
+	settings.settings.DefaultRecipients = []string{"team@example.com"}
+	settings.settings.EscalationRecipients = []string{"oncall@example.com"}
+
+	created, _ := certs.Create(context.Background(), certificate.Certificate{
+		CommonName: "urgent.example.com", SANs: []string{"urgent.example.com"},
+		CAProvider: "letsencrypt", ValidationMethod: "http-01", KeyAlgorithm: "RSA-2048",
+		Status: certificate.StatusActive, KeyRef: "key-urgent", OwningTeam: "platform",
+		AutoRenew: false, // isolate the reminder path from the renewal path in this test
+		NotBefore: time.Now().Add(-89 * 24 * time.Hour), NotAfter: time.Now().Add(24*time.Hour + 10*time.Minute),
+	})
+
+	engine := NewEngine(certs, orderSvc, &fakeAuditStore{}, notifier, settings, notifyLog, Config{ValidateAttempts: 1})
+	engine.Tick(context.Background())
+
+	var reminder *notify.Event
+	for i := range notifier.events {
+		if notifier.events[i].Kind == notify.KindExpiryReminder && notifier.events[i].CertificateID == created.ID {
+			reminder = &notifier.events[i]
+		}
+	}
+	if reminder == nil {
+		t.Fatalf("expected an expiry reminder to be sent, got %+v", notifier.events)
+	}
+	if reminder.Subject != "urgent.example.com expires in 1d" {
+		t.Errorf("expected the subject to be rendered from the template, got %q", reminder.Subject)
+	}
+	wantRecipients := []string{"team@example.com", "oncall@example.com"}
+	if len(reminder.Recipients) != len(wantRecipients) {
+		t.Fatalf("expected escalation recipients to be included at the most urgent threshold, got %v", reminder.Recipients)
+	}
+	for i, want := range wantRecipients {
+		if reminder.Recipients[i] != want {
+			t.Errorf("recipient[%d]: got %q want %q", i, reminder.Recipients[i], want)
+		}
+	}
+
+	sent, err := notifyLog.HasSent(context.Background(), created.ID, 1)
+	if err != nil || !sent {
+		t.Fatalf("expected the notification log to record this send, HasSent=%v err=%v", sent, err)
+	}
+
+	// A second tick must not notify again for the same certificate+threshold.
+	notifier.events = nil
+	engine.Tick(context.Background())
+	for _, e := range notifier.events {
+		if e.Kind == notify.KindExpiryReminder && e.CertificateID == created.ID {
+			t.Fatalf("expected no duplicate expiry reminder on a second tick, got %+v", e)
+		}
 	}
 }

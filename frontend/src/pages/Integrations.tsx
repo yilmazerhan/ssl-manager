@@ -58,6 +58,41 @@ export default function Integrations() {
 
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+          <h3 style={{ margin: 0 }}>Self-signed</h3>
+          <StatusBadge ok={status.selfsigned.available} label="Available" />
+        </div>
+        <p style={{ marginBottom: 0 }}>
+          Always available — there's no external account to configure. Certificates are signed by their own Vault-backed key and valid for{" "}
+          <strong>{status.selfsigned.validity_period}</strong>. Nothing outside this platform trusts them, so they're best used for internal or
+          test endpoints.
+        </p>
+      </div>
+
+      <div className="card">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+          <h3 style={{ margin: 0 }}>Active Directory CS</h3>
+          <StatusBadge ok={status.adcs.configured} label={status.adcs.configured ? "Configured" : "Not configured"} />
+        </div>
+        {status.adcs.configured ? (
+          <>
+            <p>
+              <strong>CA server:</strong> <code>{status.adcs.base_url}</code>
+            </p>
+            <p style={{ marginBottom: 0 }}>
+              <strong>Template:</strong> {status.adcs.template || "(CA default)"}
+            </p>
+          </>
+        ) : (
+          <p style={{ color: "var(--muted)", fontSize: 13, marginBottom: 0 }}>
+            Set <code>ADCS_BASE_URL</code> (your certsrv URL) plus <code>ADCS_USERNAME</code>/<code>ADCS_PASSWORD</code> on the backend to enroll
+            certificates from your internal Domain Controller CA. Revocation isn't available through this path — certsrv's web enrollment
+            interface has no revoke endpoint, so a revoked AD CS certificate needs `certutil -revoke` on the CA server as well.
+          </p>
+        )}
+      </div>
+
+      <div className="card">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
           <h3 style={{ margin: 0 }}>DNS-01 automation</h3>
           <StatusBadge ok={status.dns01.configured} label={status.dns01.configured ? "Automated" : "Manual"} />
         </div>
