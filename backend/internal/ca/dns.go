@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-acme/lego/v4/challenge"
@@ -26,10 +27,11 @@ type DNSAutomation struct {
 	resolver *net.Resolver
 }
 
-// NewDNSAutomation builds automation for the named provider. An empty name
-// returns (nil, nil) — the caller's job is to check for a nil
-// *DNSAutomation and fall back to manual instructions, not to treat that
-// as an error.
+// NewDNSAutomation builds automation for the named provider, reading its
+// credentials from the environment (e.g. CLOUDFLARE_DNS_API_TOKEN) the way
+// the underlying lego provider always has. An empty name returns (nil,
+// nil) — the caller's job is to check for a nil *DNSAutomation and fall
+// back to manual instructions, not to treat that as an error.
 func NewDNSAutomation(providerName string) (*DNSAutomation, error) {
 	switch providerName {
 	case "":
@@ -43,6 +45,55 @@ func NewDNSAutomation(providerName string) (*DNSAutomation, error) {
 	default:
 		return nil, fmt.Errorf("dns01: unsupported provider %q", providerName)
 	}
+}
+
+// NewDNSAutomationWithToken is NewDNSAutomation's counterpart for a token
+// supplied explicitly (from Vault, via the editable integration settings —
+// see internal/api's integration handlers) rather than read from the
+// process environment. An empty name returns (nil, nil), same as
+// NewDNSAutomation.
+func NewDNSAutomationWithToken(providerName, token string) (*DNSAutomation, error) {
+	switch providerName {
+	case "":
+		return nil, nil
+	case "cloudflare":
+		cfg := cloudflare.NewDefaultConfig()
+		cfg.AuthToken = token
+		p, err := cloudflare.NewDNSProviderConfig(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("dns01: cloudflare: %w", err)
+		}
+		return &DNSAutomation{provider: p}, nil
+	default:
+		return nil, fmt.Errorf("dns01: unsupported provider %q", providerName)
+	}
+}
+
+// DNSHolder is a hot-swappable reference to the current *DNSAutomation
+// (or nil, when DNS-01 automation isn't configured) — the same pattern as
+// ca.Registry, and for the same reason: editing DNS-01 integration
+// settings at runtime (see internal/api's integration handlers) replaces
+// this while requests that build/use a Let's Encrypt authority may be
+// reading it concurrently.
+type DNSHolder struct {
+	mu         sync.RWMutex
+	automation *DNSAutomation
+}
+
+func NewDNSHolder(automation *DNSAutomation) *DNSHolder {
+	return &DNSHolder{automation: automation}
+}
+
+func (h *DNSHolder) Get() *DNSAutomation {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.automation
+}
+
+func (h *DNSHolder) Set(automation *DNSAutomation) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.automation = automation
 }
 
 // Present publishes the TXT record via the provider's API, then blocks

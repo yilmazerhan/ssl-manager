@@ -354,7 +354,7 @@ func (f *fakeNotifyLogStore) Stats(_ context.Context, since time.Time) (sent, fa
 func TestEngine_RenewsExpiringCertificate(t *testing.T) {
 	certs := newFakeCertStore()
 	orders := newFakeOrderStore()
-	authorities := ca.Registry(&instantAuthority{})
+	authorities := ca.NewRegistry(&instantAuthority{})
 	orderSvc := order.NewService(orders, certs, newFakeKeyManager(), authorities)
 	auditStore := &fakeAuditStore{}
 	notifier := &fakeNotifier{}
@@ -392,7 +392,7 @@ func TestEngine_RenewsExpiringCertificate(t *testing.T) {
 func TestEngine_ReportsRenewalFailure(t *testing.T) {
 	certs := newFakeCertStore()
 	orders := newFakeOrderStore()
-	authorities := ca.Registry(&instantAuthority{failIssue: true})
+	authorities := ca.NewRegistry(&instantAuthority{failIssue: true})
 	orderSvc := order.NewService(orders, certs, newFakeKeyManager(), authorities)
 	auditStore := &fakeAuditStore{}
 	notifier := &fakeNotifier{}
@@ -422,7 +422,7 @@ func TestEngine_ReportsRenewalFailure(t *testing.T) {
 func TestEngine_DoesNotRenewCertificateNotYetDue(t *testing.T) {
 	certs := newFakeCertStore()
 	orders := newFakeOrderStore()
-	authorities := ca.Registry(&instantAuthority{})
+	authorities := ca.NewRegistry(&instantAuthority{})
 	orderSvc := order.NewService(orders, certs, newFakeKeyManager(), authorities)
 
 	created, _ := certs.Create(context.Background(), certificate.Certificate{
@@ -445,7 +445,7 @@ func TestEngine_DoesNotRenewCertificateNotYetDue(t *testing.T) {
 func TestEngine_SendsTemplatedExpiryReminder_WithEscalationAndDedupe(t *testing.T) {
 	certs := newFakeCertStore()
 	orders := newFakeOrderStore()
-	authorities := ca.Registry(&instantAuthority{})
+	authorities := ca.NewRegistry(&instantAuthority{})
 	orderSvc := order.NewService(orders, certs, newFakeKeyManager(), authorities)
 	notifier := &fakeNotifier{}
 	notifyLog := &fakeNotifyLogStore{}

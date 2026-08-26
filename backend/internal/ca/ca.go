@@ -15,6 +15,7 @@ package ca
 import (
 	"context"
 	"crypto"
+	"sync"
 	"time"
 )
 
@@ -94,10 +95,65 @@ type Authority interface {
 	Revoke(ctx context.Context, certPEM, caReference string) error
 }
 
-func Registry(authorities ...Authority) map[string]Authority {
-	reg := make(map[string]Authority, len(authorities))
+// Registry is the live set of configured CA authorities, keyed by
+// Authority.Name(). It's a mutex-guarded map rather than a plain one
+// because integration settings are now editable at runtime (see
+// internal/api's integration handlers): an admin's edit rebuilds one
+// provider's Authority and swaps it in while HTTP handlers and the
+// renewal engine may be reading the registry concurrently. A plain Go map
+// read concurrently with a write panics ("concurrent map read and map
+// write") rather than just returning stale data, so this can't be skipped.
+type Registry struct {
+	mu     sync.RWMutex
+	byName map[string]Authority
+}
+
+func NewRegistry(authorities ...Authority) *Registry {
+	r := &Registry{byName: make(map[string]Authority, len(authorities))}
 	for _, a := range authorities {
-		reg[a.Name()] = a
+		r.byName[a.Name()] = a
 	}
-	return reg
+	return r
+}
+
+// Get reports (nil, false) for a provider that either was never configured
+// or whose configuration was since removed (e.g. an admin cleared AD CS's
+// base URL) — the same shape as a plain map index, so existing callers
+// didn't need to change how they check for "not configured".
+func (r *Registry) Get(name string) (Authority, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	a, ok := r.byName[name]
+	return a, ok
+}
+
+// Set installs (or replaces) the live Authority for a provider — this is
+// what makes an integration-settings edit take effect immediately, with no
+// restart, for every request that comes in after it returns.
+func (r *Registry) Set(name string, a Authority) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.byName[name] = a
+}
+
+// Delete removes a provider from the registry entirely — used when an
+// admin clears an optional integration's configuration (e.g. AD CS's base
+// URL) back to "not configured" rather than replacing it with something
+// new.
+func (r *Registry) Delete(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.byName, name)
+}
+
+// Names lists every currently configured provider, sorted for stable
+// output (used by the integrations status endpoint).
+func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.byName))
+	for n := range r.byName {
+		names = append(names, n)
+	}
+	return names
 }

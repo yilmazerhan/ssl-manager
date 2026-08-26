@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"net/http"
-	"net/url"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -16,6 +15,7 @@ import (
 	"github.com/yilmazerhan/ssl-manager/backend/internal/auth"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/ca"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/caaccount"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/caconfig"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/config"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/db"
@@ -50,9 +50,6 @@ func main() {
 	// deployment's own startup logs.
 	if cfg.DevAuthEnabled {
 		log.Println("SECURITY WARNING: DEV_AUTH_ENABLED is true — POST /auth/dev-login will mint a real session for ANY email/role/team with no credential check at all. This must never be true on anything reachable outside local development.")
-	}
-	if cfg.ADCSAllowBasicAuth && !strings.HasPrefix(cfg.ADCSBaseURL, "https://") {
-		log.Fatal("ADCS_ALLOW_BASIC_AUTH is set but ADCS_BASE_URL is not https:// — refusing to start, since that would send credentials in cleartext")
 	}
 	if cfg.LetsEncryptInsecureSkipVerify {
 		log.Println("SECURITY WARNING: LETSENCRYPT_INSECURE_SKIP_VERIFY is true — TLS verification against the ACME directory is disabled. This must never be set against a real CA, only a local test server like Pebble.")
@@ -95,12 +92,51 @@ func main() {
 		log.Printf("discovery: recover interrupted scans: %v", err)
 	}
 
-	dnsAutomation, err := ca.NewDNSAutomation(cfg.DNS01Provider)
+	// CA/DNS integration settings are editable at runtime from here on
+	// (see internal/api's integration handlers) — the database, not the
+	// environment, is the source of truth for them. Environment variables
+	// only matter on the very first run against a given database, seeding
+	// initial values exactly once, the same pattern seedDefaultAdmin above
+	// already uses for the local admin account.
+	caSettings := caconfig.NewPostgresStore(pool)
+	seedCASettingsFromEnv(ctx, caSettings, secretStore, cfg)
+
+	var leSettings caconfig.LetsEncryptSettings
+	if _, err := caSettings.Get(ctx, "letsencrypt", &leSettings); err != nil {
+		log.Fatalf("load Let's Encrypt settings: %v", err)
+	}
+	var zsSettings caconfig.ZeroSSLSettings
+	if _, err := caSettings.Get(ctx, "zerossl", &zsSettings); err != nil {
+		log.Fatalf("load ZeroSSL settings: %v", err)
+	}
+	var adcsSettings caconfig.ADCSSettings
+	if _, err := caSettings.Get(ctx, "adcs", &adcsSettings); err != nil {
+		log.Fatalf("load AD CS settings: %v", err)
+	}
+	var dnsSettings caconfig.DNS01Settings
+	if _, err := caSettings.Get(ctx, "dns01", &dnsSettings); err != nil {
+		log.Fatalf("load DNS-01 settings: %v", err)
+	}
+	var selfSignedSettings caconfig.SelfSignedSettings
+	if _, err := caSettings.Get(ctx, "selfsigned", &selfSignedSettings); err != nil {
+		log.Fatalf("load self-signed settings: %v", err)
+	}
+
+	// The same safety check the ADCS PUT handler re-enforces on every
+	// future edit (integrations.go) — checked here too since this
+	// particular value can come straight from the environment on a first
+	// run, before any edit has ever gone through that handler.
+	if adcsSettings.AllowBasicAuth && !strings.HasPrefix(adcsSettings.BaseURL, "https://") {
+		log.Fatal("AD CS is configured with allow_basic_auth set but a non-https base_url — refusing to start, since that would send credentials in cleartext")
+	}
+
+	dnsAutomation, err := ca.NewDNSAutomationWithToken(dnsSettings.Provider, vaultSecretString(ctx, secretStore, caconfig.SecretPathDNS01, "token"))
 	if err != nil {
 		log.Fatalf("initialize DNS-01 automation: %v", err)
 	}
+	dnsHolder := ca.NewDNSHolder(dnsAutomation)
 	if dnsAutomation == nil {
-		log.Println("DNS-01 automation is not configured (DNS01_PROVIDER unset) — DNS-01 falls back to manual instructions")
+		log.Println("DNS-01 automation is not configured — DNS-01 falls back to manual instructions")
 	}
 
 	// A Let's Encrypt account registration failure — a bad contact email, a
@@ -112,41 +148,38 @@ func main() {
 	// an order that actually requests it fails with a clear "provider not
 	// available" instead of the whole backend refusing to start.
 	letsEncrypt, err := ca.NewLetsEncrypt(ctx, ca.LetsEncryptConfig{
-		Environment:        cfg.LetsEncryptEnvironment,
-		DirectoryURL:       cfg.LetsEncryptDirectoryURL,
-		ContactEmail:       cfg.LetsEncryptEmail,
+		Environment:        leSettings.Environment,
+		DirectoryURL:       leSettings.DirectoryURL,
+		ContactEmail:       leSettings.ContactEmail,
 		InsecureSkipVerify: cfg.LetsEncryptInsecureSkipVerify,
 	}, secretStore, accounts, dnsAutomation)
 	if err != nil {
-		log.Printf("Let's Encrypt is not available: %v — certificate orders requesting ca_provider=letsencrypt will fail until LETSENCRYPT_EMAIL/LETSENCRYPT_DIRECTORY_URL are fixed and the backend restarted", err)
+		log.Printf("Let's Encrypt is not available: %v — certificate orders requesting ca_provider=letsencrypt will fail until this is fixed from the Integrations screen (or the backend is restarted after fixing it)", err)
 	}
-	zeroSSL := ca.NewZeroSSL(ca.ZeroSSLConfig{APIKey: cfg.ZeroSSLAPIKey, BaseURL: cfg.ZeroSSLBaseURL})
-	selfSigned := ca.NewSelfSigned(cfg.SelfSignedValidity)
-	var authorities map[string]ca.Authority
+	zeroSSL := ca.NewZeroSSL(ca.ZeroSSLConfig{
+		APIKey:  vaultSecretString(ctx, secretStore, caconfig.SecretPathZeroSSL, "api_key"),
+		BaseURL: zsSettings.BaseURL,
+	})
+	selfSignedValidity := time.Duration(selfSignedSettings.ValidityDays) * 24 * time.Hour
+	selfSigned := ca.NewSelfSigned(selfSignedValidity)
+	var authorities *ca.Registry
 	if letsEncrypt != nil {
-		authorities = ca.Registry(letsEncrypt, zeroSSL, selfSigned)
+		authorities = ca.NewRegistry(letsEncrypt, zeroSSL, selfSigned)
 	} else {
-		authorities = ca.Registry(zeroSSL, selfSigned)
+		authorities = ca.NewRegistry(zeroSSL, selfSigned)
 	}
-	if cfg.ADCSBaseURL != "" {
-		authorities["adcs"] = ca.NewADCS(ca.ADCSConfig{
-			BaseURL:            cfg.ADCSBaseURL,
-			Template:           cfg.ADCSTemplate,
-			Username:           cfg.ADCSUsername,
-			Password:           cfg.ADCSPassword,
-			AllowBasicAuth:     cfg.ADCSAllowBasicAuth,
+	if adcsSettings.BaseURL != "" {
+		authorities.Set("adcs", ca.NewADCS(ca.ADCSConfig{
+			BaseURL:            adcsSettings.BaseURL,
+			Template:           adcsSettings.Template,
+			Username:           adcsSettings.Username,
+			Password:           vaultSecretString(ctx, secretStore, caconfig.SecretPathADCS, "password"),
+			AllowBasicAuth:     adcsSettings.AllowBasicAuth,
 			InsecureSkipVerify: cfg.ADCSInsecureSkipVerify,
-		})
+		}))
 	} else {
-		log.Println("AD CS is not configured (ADCS_BASE_URL unset) — the adcs certificate authority is unavailable")
+		log.Println("AD CS is not configured — the adcs certificate authority is unavailable")
 	}
-
-	integrationsStatus := buildIntegrationsStatus(ctx, cfg, accounts, dnsAutomation != nil)
-	integrationsStatus.SelfSigned.Available = true
-	integrationsStatus.SelfSigned.ValidityPeriod = cfg.SelfSignedValidity.String()
-	integrationsStatus.ADCS.Configured = cfg.ADCSBaseURL != ""
-	integrationsStatus.ADCS.BaseURL = stripURLCredentials(cfg.ADCSBaseURL)
-	integrationsStatus.ADCS.Template = cfg.ADCSTemplate
 
 	orderService := order.NewService(orders, certs, keyManager, authorities)
 
@@ -182,21 +215,26 @@ func main() {
 	}
 
 	router := api.NewRouter(api.Dependencies{
-		Certs:                certs,
-		Orders:               orderService,
-		Renewal:              renewalEngine,
-		Users:                users,
-		Sessions:             sessions,
-		APIKeys:              apiKeys,
-		DownloadTokens:       downloadTokens,
-		Audit:                auditStore,
-		OIDC:                 oidcHandler,
-		DevAuthEnabled:       cfg.DevAuthEnabled,
-		Authorities:          authorities,
-		Integrations:         integrationsStatus,
-		Discovery:            discoveryService,
-		NotificationSettings: reminderSettings,
-		NotifyLog:            notifyLog,
+		Certs:                         certs,
+		Orders:                        orderService,
+		Renewal:                       renewalEngine,
+		Users:                         users,
+		Sessions:                      sessions,
+		APIKeys:                       apiKeys,
+		DownloadTokens:                downloadTokens,
+		Audit:                         auditStore,
+		OIDC:                          oidcHandler,
+		DevAuthEnabled:                cfg.DevAuthEnabled,
+		Authorities:                   authorities,
+		Discovery:                     discoveryService,
+		NotificationSettings:          reminderSettings,
+		NotifyLog:                     notifyLog,
+		CASettings:                    caSettings,
+		Secrets:                       secretStore,
+		CAAccounts:                    accounts,
+		DNSAutomation:                 dnsHolder,
+		LetsEncryptInsecureSkipVerify: cfg.LetsEncryptInsecureSkipVerify,
+		ADCSInsecureSkipVerify:        cfg.ADCSInsecureSkipVerify,
 	})
 
 	server := &http.Server{Addr: cfg.Addr, Handler: router}
@@ -244,47 +282,92 @@ func seedDefaultAdmin(ctx context.Context, users *user.PostgresStore) {
 	log.Println("SECURITY WARNING: no local account existed yet, so a default account was seeded — username \"admin\", password \"admin\", role admin. It must change its password on first login (enforced server-side). Change it immediately if this instance is reachable by anyone you don't trust with admin access.")
 }
 
-// buildIntegrationsStatus is a one-time snapshot for the admin-facing
-// "is this connected" page (docs/plan.html section 08) — it never handles
-// a request itself, so a stale AccountRegistered flag after a mid-run
-// re-registration isn't a concern in practice (that only happens once,
-// at startup, before this snapshot is even taken).
-func buildIntegrationsStatus(ctx context.Context, cfg config.Config, accounts caaccount.Store, dnsConfigured bool) api.IntegrationsStatus {
-	var status api.IntegrationsStatus
-
-	status.LetsEncrypt.Environment = cfg.LetsEncryptEnvironment
-	status.LetsEncrypt.DirectoryURL = stripURLCredentials(cfg.LetsEncryptDirectoryURL)
-	status.LetsEncrypt.ContactEmail = cfg.LetsEncryptEmail
-	if account, err := accounts.Get(ctx, "letsencrypt", cfg.LetsEncryptEnvironment); err == nil {
-		status.LetsEncrypt.AccountRegistered = account.AccountRef != ""
+// seedCASettingsFromEnv copies each CA/DNS integration's environment-variable
+// configuration into caconfig — but only the very first time this app runs
+// against a given database, exactly once per provider, the same "env seeds
+// DB, DB wins forever after" pattern seedDefaultAdmin uses. Once an admin
+// edits a provider from the Integrations screen (see internal/api's
+// integration handlers), its environment variables are never consulted
+// again, even across restarts — the whole point of making these editable.
+func seedCASettingsFromEnv(ctx context.Context, caSettings caconfig.Store, secretStore secrets.SecretStore, cfg config.Config) {
+	var le caconfig.LetsEncryptSettings
+	if found, err := caSettings.Get(ctx, "letsencrypt", &le); err != nil {
+		log.Printf("check existing Let's Encrypt settings: %v", err)
+	} else if !found {
+		seed := caconfig.LetsEncryptSettings{Environment: cfg.LetsEncryptEnvironment, DirectoryURL: cfg.LetsEncryptDirectoryURL, ContactEmail: cfg.LetsEncryptEmail}
+		if err := caSettings.Set(ctx, "letsencrypt", seed); err != nil {
+			log.Printf("seed Let's Encrypt settings from environment: %v", err)
+		}
 	}
 
-	status.ZeroSSL.Configured = cfg.ZeroSSLAPIKey != ""
-	status.ZeroSSL.BaseURL = cfg.ZeroSSLBaseURL
+	var zs caconfig.ZeroSSLSettings
+	if found, err := caSettings.Get(ctx, "zerossl", &zs); err != nil {
+		log.Printf("check existing ZeroSSL settings: %v", err)
+	} else if !found {
+		if err := caSettings.Set(ctx, "zerossl", caconfig.ZeroSSLSettings{BaseURL: cfg.ZeroSSLBaseURL}); err != nil {
+			log.Printf("seed ZeroSSL settings from environment: %v", err)
+		}
+		if cfg.ZeroSSLAPIKey != "" {
+			if err := secretStore.Put(ctx, caconfig.SecretPathZeroSSL, map[string]interface{}{"api_key": cfg.ZeroSSLAPIKey}); err != nil {
+				log.Printf("seed ZeroSSL API key from environment: %v", err)
+			}
+		}
+	}
 
-	status.DNS01.Provider = cfg.DNS01Provider
-	status.DNS01.Configured = dnsConfigured
+	var adcs caconfig.ADCSSettings
+	if found, err := caSettings.Get(ctx, "adcs", &adcs); err != nil {
+		log.Printf("check existing AD CS settings: %v", err)
+	} else if !found {
+		seed := caconfig.ADCSSettings{BaseURL: cfg.ADCSBaseURL, Template: cfg.ADCSTemplate, Username: cfg.ADCSUsername, AllowBasicAuth: cfg.ADCSAllowBasicAuth}
+		if err := caSettings.Set(ctx, "adcs", seed); err != nil {
+			log.Printf("seed AD CS settings from environment: %v", err)
+		}
+		if cfg.ADCSPassword != "" {
+			if err := secretStore.Put(ctx, caconfig.SecretPathADCS, map[string]interface{}{"password": cfg.ADCSPassword}); err != nil {
+				log.Printf("seed AD CS password from environment: %v", err)
+			}
+		}
+	}
 
-	return status
+	var dns caconfig.DNS01Settings
+	if found, err := caSettings.Get(ctx, "dns01", &dns); err != nil {
+		log.Printf("check existing DNS-01 settings: %v", err)
+	} else if !found {
+		if err := caSettings.Set(ctx, "dns01", caconfig.DNS01Settings{Provider: cfg.DNS01Provider}); err != nil {
+			log.Printf("seed DNS-01 settings from environment: %v", err)
+		}
+		if cfg.CloudflareDNSAPIToken != "" {
+			if err := secretStore.Put(ctx, caconfig.SecretPathDNS01, map[string]interface{}{"token": cfg.CloudflareDNSAPIToken}); err != nil {
+				log.Printf("seed DNS-01 token from environment: %v", err)
+			}
+		}
+	}
+
+	var ss caconfig.SelfSignedSettings
+	if found, err := caSettings.Get(ctx, "selfsigned", &ss); err != nil {
+		log.Printf("check existing self-signed settings: %v", err)
+	} else if !found {
+		days := int(cfg.SelfSignedValidity / (24 * time.Hour))
+		if days <= 0 {
+			days = 365
+		}
+		if err := caSettings.Set(ctx, "selfsigned", caconfig.SelfSignedSettings{ValidityDays: days}); err != nil {
+			log.Printf("seed self-signed settings from environment: %v", err)
+		}
+	}
 }
 
-// stripURLCredentials removes any embedded userinfo (https://user:pass@…)
-// before a configured CA URL is echoed back through GET /api/v1/integrations
-// — an admin-only endpoint, but there's no reason for it to ever repeat a
-// credential an operator (mis)configured directly into a URL rather than
-// its own dedicated username/password field. Falls back to the raw string
-// if it doesn't parse as a URL at all, since this is a display value, not
-// something anything else depends on.
-func stripURLCredentials(rawURL string) string {
-	if rawURL == "" {
-		return rawURL
+// vaultSecretString fetches a single string field from a Vault secret,
+// returning "" if the secret (or that field within it) doesn't exist —
+// used to load the current value of a CA credential that lives in Vault
+// rather than caconfig's Postgres-backed settings.
+func vaultSecretString(ctx context.Context, store secrets.SecretStore, path, field string) string {
+	data, err := store.Get(ctx, path)
+	if err != nil || data == nil {
+		return ""
 	}
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	u.User = nil
-	return u.String()
+	v, _ := data[field].(string)
+	return v
 }
 
 func buildNotifier(cfg config.Config) notify.Sender {

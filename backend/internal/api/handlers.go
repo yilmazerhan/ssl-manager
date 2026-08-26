@@ -27,10 +27,6 @@ func (h *handlers) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (h *handlers) getIntegrations(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.deps.Integrations)
-}
-
 func (h *handlers) listCertificates(w http.ResponseWriter, r *http.Request) {
 	identity, _ := auth.IdentityFromContext(r.Context())
 
@@ -171,7 +167,7 @@ func (h *handlers) revokeCertificate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if authority, ok := h.deps.Authorities[cert.CAProvider]; ok {
+	if authority, ok := h.deps.Authorities.Get(cert.CAProvider); ok {
 		version, err := h.deps.Certs.LatestVersion(r.Context(), cert.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "could not load certificate material to revoke")

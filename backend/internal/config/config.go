@@ -38,8 +38,13 @@ type Config struct {
 	LetsEncryptInsecureSkipVerify bool
 	// DNS01Provider names a real DNS provider (currently "cloudflare") to
 	// automate DNS-01 TXT records; empty means DNS-01 falls back to manual
-	// instructions, same as HTTP-01.
-	DNS01Provider string
+	// instructions, same as HTTP-01. CloudflareDNSAPIToken is only read
+	// here (rather than left to lego's own env-reading DNS provider
+	// constructor) so cmd/api can seed it into the editable integration
+	// settings' Vault-backed secret on first run, the same as every other
+	// CA credential.
+	DNS01Provider         string
+	CloudflareDNSAPIToken string
 
 	ZeroSSLAPIKey  string
 	ZeroSSLBaseURL string
@@ -101,6 +106,7 @@ func Load() Config {
 		LetsEncryptEmail:              getEnv("LETSENCRYPT_EMAIL", "admin@example.com"),
 		LetsEncryptInsecureSkipVerify: getBool("LETSENCRYPT_INSECURE_SKIP_VERIFY", false),
 		DNS01Provider:                 getEnv("DNS01_PROVIDER", ""),
+		CloudflareDNSAPIToken:         getEnv("CLOUDFLARE_DNS_API_TOKEN", ""),
 
 		ZeroSSLAPIKey:  getEnv("ZEROSSL_API_KEY", ""),
 		ZeroSSLBaseURL: getEnv("ZEROSSL_BASE_URL", "https://api.zerossl.com"),

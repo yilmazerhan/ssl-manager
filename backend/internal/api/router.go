@@ -10,11 +10,14 @@ import (
 	"github.com/yilmazerhan/ssl-manager/backend/internal/audit"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/auth"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/ca"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/caaccount"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/caconfig"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/discovery"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/downloadtoken"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/order"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/renewal"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/secrets"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/user"
 )
 
@@ -29,17 +32,36 @@ type Dependencies struct {
 	Audit                audit.Store
 	OIDC                 *auth.OIDCHandler // nil if OIDC isn't configured
 	DevAuthEnabled       bool
-	Authorities          map[string]ca.Authority
-	Integrations         IntegrationsStatus
+	Authorities          *ca.Registry
 	Discovery            *discovery.Service
 	NotificationSettings renewal.SettingsStore
 	NotifyLog            renewal.NotifyLogStore
+
+	// The fields below back the editable integrations screens (GET/PUT
+	// /api/v1/integrations*, see integrations.go): CASettings/Secrets/
+	// CAAccounts let a handler read the current live configuration and
+	// persist+hot-swap an edit into Authorities; DNSAutomation is the same
+	// kind of hot-swappable holder for the one piece of CA config that
+	// isn't itself a ca.Authority. The two InsecureSkipVerify flags are
+	// environment-only escape hatches, never exposed for editing (see
+	// caconfig.LetsEncryptSettings' and ADCSSettings' doc comments), but
+	// still needed to rebuild an authority faithfully after an edit.
+	CASettings                    caconfig.Store
+	Secrets                       secrets.SecretStore
+	CAAccounts                    caaccount.Store
+	DNSAutomation                 *ca.DNSHolder
+	LetsEncryptInsecureSkipVerify bool
+	ADCSInsecureSkipVerify        bool
 }
 
-// IntegrationsStatus is a point-in-time snapshot of how the CA/DNS
-// integrations are configured, computed once at startup (see cmd/api) —
-// it answers "is this connected", the admin-facing question from
-// docs/plan.html section 08, without exposing the credentials themselves.
+// IntegrationsStatus is what GET /api/v1/integrations returns — computed
+// fresh on every call (not a startup snapshot: integration settings are
+// now editable at runtime, see integrations.go) from the current
+// caconfig-stored settings, Vault secret presence, and what's actually
+// live in the Authorities registry. It answers "is this connected", the
+// admin-facing question from docs/plan.html section 08, without exposing
+// the credentials themselves — secret fields only ever appear as a
+// "*Set bool" flag.
 type IntegrationsStatus struct {
 	LetsEncrypt struct {
 		Environment       string `json:"environment"`
@@ -50,19 +72,25 @@ type IntegrationsStatus struct {
 	ZeroSSL struct {
 		Configured bool   `json:"configured"`
 		BaseURL    string `json:"base_url"`
+		APIKeySet  bool   `json:"api_key_set"`
 	} `json:"zerossl"`
 	DNS01 struct {
 		Provider   string `json:"provider"`
 		Configured bool   `json:"configured"`
+		TokenSet   bool   `json:"token_set"`
 	} `json:"dns01"`
 	SelfSigned struct {
 		Available      bool   `json:"available"`
 		ValidityPeriod string `json:"validity_period"`
+		ValidityDays   int    `json:"validity_days"`
 	} `json:"selfsigned"`
 	ADCS struct {
-		Configured bool   `json:"configured"`
-		BaseURL    string `json:"base_url"`
-		Template   string `json:"template"`
+		Configured     bool   `json:"configured"`
+		BaseURL        string `json:"base_url"`
+		Template       string `json:"template"`
+		Username       string `json:"username"`
+		AllowBasicAuth bool   `json:"allow_basic_auth"`
+		PasswordSet    bool   `json:"password_set"`
 	} `json:"adcs"`
 }
 
@@ -107,6 +135,11 @@ func NewRouter(deps Dependencies) http.Handler {
 	mux.Handle("POST /api/v1/certificate-orders/{id}/validate", authed(auth.RequireScope(auth.ScopeCertsIssue)(http.HandlerFunc(h.validateOrder))))
 
 	mux.Handle("GET /api/v1/integrations", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.getIntegrations))))
+	mux.Handle("PUT /api/v1/integrations/letsencrypt", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.updateLetsEncryptSettings))))
+	mux.Handle("PUT /api/v1/integrations/zerossl", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.updateZeroSSLSettings))))
+	mux.Handle("PUT /api/v1/integrations/adcs", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.updateADCSSettings))))
+	mux.Handle("PUT /api/v1/integrations/dns01", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.updateDNS01Settings))))
+	mux.Handle("PUT /api/v1/integrations/selfsigned", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.updateSelfSignedSettings))))
 
 	mux.Handle("POST /api/v1/discovery/scans", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.createDiscoveryScan))))
 	mux.Handle("GET /api/v1/discovery/scans", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.listDiscoveryScans))))
