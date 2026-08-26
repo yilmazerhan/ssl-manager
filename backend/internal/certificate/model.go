@@ -30,6 +30,14 @@ type Certificate struct {
 	OwningTeam      string `json:"owning_team"`
 	AutoRenew       bool   `json:"auto_renew"`
 	RenewBeforeDays int    `json:"renew_before_days"`
+	// Subject fields beyond CommonName/SANs — all optional. Carried forward
+	// unchanged on renewal (see order.Service.CreateRenewal) so a
+	// certificate's subject stays stable across reissuance.
+	Organization       string `json:"organization,omitempty"`
+	OrganizationalUnit string `json:"organizational_unit,omitempty"`
+	Country            string `json:"country,omitempty"`
+	State              string `json:"state,omitempty"`
+	Locality           string `json:"locality,omitempty"`
 	// NotifyEmails overrides notification_settings.default_recipients for
 	// this certificate's expiry reminders when non-empty.
 	NotifyEmails []string  `json:"notify_emails,omitempty"`

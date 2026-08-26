@@ -33,6 +33,12 @@ type Order struct {
 	AttemptCount     int              `json:"attempt_count"`
 	CreatedAt        time.Time        `json:"created_at"`
 	CompletedAt      *time.Time       `json:"completed_at,omitempty"`
+
+	Organization       string `json:"organization,omitempty"`
+	OrganizationalUnit string `json:"organizational_unit,omitempty"`
+	Country            string `json:"country,omitempty"`
+	State              string `json:"state,omitempty"`
+	Locality           string `json:"locality,omitempty"`
 }
 
 // Public returns a copy safe to send to a client: the provider's internal
@@ -52,4 +58,11 @@ type CreateRequest struct {
 	CAProvider       string   `json:"ca_provider"`
 	ValidationMethod string   `json:"validation_method"`
 	KeyAlgorithm     string   `json:"key_algorithm"`
+	// Subject fields beyond CommonName/SANs — all optional. See
+	// validateSubject for the light format checks applied to them.
+	Organization       string `json:"organization"`
+	OrganizationalUnit string `json:"organizational_unit"`
+	Country            string `json:"country"`
+	State              string `json:"state"`
+	Locality           string `json:"locality"`
 }

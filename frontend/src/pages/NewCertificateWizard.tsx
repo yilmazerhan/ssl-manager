@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, CertificateOrder } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { getChallengeInstructions } from "../lib/challengeInstructions";
 
 type Step = "domains" | "authority" | "validation" | "review" | "challenge" | "done";
 
@@ -35,6 +36,12 @@ export default function NewCertificateWizard() {
   const [caProvider, setCaProvider] = useState("letsencrypt");
   const [validationMethod, setValidationMethod] = useState("http-01");
   const [owningTeam, setOwningTeam] = useState(identity?.team ?? "");
+  const [showSubjectFields, setShowSubjectFields] = useState(false);
+  const [organization, setOrganization] = useState("");
+  const [organizationalUnit, setOrganizationalUnit] = useState("");
+  const [country, setCountry] = useState("");
+  const [state, setStateField] = useState("");
+  const [locality, setLocality] = useState("");
   const [order, setOrder] = useState<CertificateOrder | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
@@ -45,6 +52,8 @@ export default function NewCertificateWizard() {
     .map((d) => d.trim())
     .filter(Boolean);
 
+  const subjectSummary = [organization, organizationalUnit, locality, state, country].filter(Boolean).join(", ");
+
   async function submitOrder() {
     setError(null);
     try {
@@ -53,6 +62,11 @@ export default function NewCertificateWizard() {
         domains,
         ca_provider: caProvider,
         validation_method: validationMethod,
+        organization: organization || undefined,
+        organizational_unit: organizationalUnit || undefined,
+        country: country || undefined,
+        state: state || undefined,
+        locality: locality || undefined,
       });
       // "none" (selfsigned) has nothing for anyone to publish or approve —
       // it's already verified at creation time, so skip straight to
@@ -107,7 +121,7 @@ export default function NewCertificateWizard() {
         ))}
       </div>
 
-      {error && <div className="card">{error}</div>}
+      {error && <div className="error-banner">{error}</div>}
 
       {step === "domains" && (
         <div className="card">
@@ -131,6 +145,52 @@ export default function NewCertificateWizard() {
               <span style={{ fontSize: 12, color: "var(--muted)" }}>Certificates you request belong to your own team.</span>
             )}
           </div>
+
+          <button
+            type="button"
+            className="auth-alt-toggle"
+            style={{ marginBottom: showSubjectFields ? 16 : 4 }}
+            onClick={() => setShowSubjectFields((v) => !v)}
+          >
+            {showSubjectFields
+              ? "Hide subject details"
+              : subjectSummary
+              ? `Subject details: ${subjectSummary}`
+              : "Add organization, unit, country… (optional)"}
+          </button>
+
+          {showSubjectFields && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 16px" }}>
+              <div className="field">
+                <label>Organization (O)</label>
+                <input value={organization} onChange={(e) => setOrganization(e.target.value)} placeholder="Acme Corp" />
+              </div>
+              <div className="field">
+                <label>Organizational unit (OU)</label>
+                <input value={organizationalUnit} onChange={(e) => setOrganizationalUnit(e.target.value)} placeholder="Platform Engineering" />
+              </div>
+              <div className="field">
+                <label>Locality / city (L)</label>
+                <input value={locality} onChange={(e) => setLocality(e.target.value)} placeholder="Istanbul" />
+              </div>
+              <div className="field">
+                <label>State / province (ST)</label>
+                <input value={state} onChange={(e) => setStateField(e.target.value)} placeholder="Istanbul" />
+              </div>
+              <div className="field">
+                <label>Country (C)</label>
+                <input
+                  value={country}
+                  onChange={(e) => setCountry(e.target.value.toUpperCase().slice(0, 2))}
+                  placeholder="TR"
+                  maxLength={2}
+                  style={{ width: 90 }}
+                />
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>2-letter ISO code, e.g. TR, US, DE</span>
+              </div>
+            </div>
+          )}
+
           <button className="primary" disabled={domains.length === 0} onClick={() => setStep("authority")}>
             Continue
           </button>
@@ -198,6 +258,12 @@ export default function NewCertificateWizard() {
           <p>
             <strong>Owning team:</strong> {owningTeam || identity?.team || "unassigned"}
           </p>
+          {subjectSummary && (
+            <p>
+              <strong>Subject:</strong> {subjectSummary}
+              {country ? `, ${country}` : ""}
+            </p>
+          )}
           <p style={{ color: "var(--muted)", fontSize: 13 }}>
             A key pair is generated for this certificate in Vault when you submit — it never leaves the server, not even to us.
           </p>
@@ -218,24 +284,37 @@ export default function NewCertificateWizard() {
               certificate template requires manager approval, approve the pending request in the CA's console, then check again.
             </p>
           ) : (
-            <p>Prove you control {challenges.length === 1 ? "this domain" : "these domains"} by publishing the following before checking again:</p>
+            <p>Prove you control {challenges.length === 1 ? "this domain" : "these domains"} before checking again — follow the steps below for each:</p>
           )}
-          {challenges.map((c) => (
-            <div key={c.domain} style={{ marginBottom: 12 }}>
-              <p style={{ fontSize: 13, color: "var(--muted)", marginBottom: 4 }}>
-                {c.domain} · {c.type} {c.verified ? "· verified" : ""}
-              </p>
-              {c.error && <p style={{ fontSize: 13, color: "var(--danger, #c0392b)", marginBottom: 4 }}>{c.error}</p>}
-              {c.automated ? (
-                c.resource_name && <p style={{ fontSize: 13, color: "var(--muted)" }}>{c.resource_name}</p>
-              ) : (
-                <>
-                  <code className="challenge-value">{c.resource_name}</code>
-                  <code className="challenge-value">{c.value}</code>
-                </>
-              )}
-            </div>
-          ))}
+          {challenges.map((c) => {
+            const instructions = getChallengeInstructions(caProvider, c.type);
+            return (
+              <div key={c.domain} className="card" style={{ background: "var(--surface-2)", marginBottom: 14 }}>
+                <p style={{ fontSize: 13, color: "var(--muted)", marginBottom: 4 }}>
+                  <strong style={{ color: "var(--text)" }}>{c.domain}</strong> · {c.type} {c.verified ? "· verified ✓" : ""}
+                </p>
+                {c.error && <div className="error-banner">{c.error}</div>}
+                {c.automated ? (
+                  c.resource_name && <p style={{ fontSize: 13, color: "var(--muted)" }}>{c.resource_name}</p>
+                ) : (
+                  <>
+                    <p style={{ fontSize: 13.5, marginBottom: 10 }}>{instructions.summary}</p>
+                    <ol style={{ fontSize: 13.5, paddingLeft: 20, margin: "0 0 12px" }}>
+                      {instructions.steps.map((step, i) => (
+                        <li key={i} style={{ marginBottom: 4 }}>
+                          {step}
+                        </li>
+                      ))}
+                    </ol>
+                    <label style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>{instructions.valueLabels[0]}</label>
+                    <code className="challenge-value">{c.resource_name}</code>
+                    <label style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>{instructions.valueLabels[1]}</label>
+                    <code className="challenge-value">{c.value}</code>
+                  </>
+                )}
+              </div>
+            );
+          })}
           <button className="primary" onClick={checkNow} disabled={checking}>
             {checking ? "Checking…" : "Check now"}
           </button>

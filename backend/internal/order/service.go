@@ -49,23 +49,56 @@ func validateDomains(domains []string) error {
 	return nil
 }
 
+// maxSubjectFieldLength bounds every free-text subject field (O/OU/ST/L) —
+// generous for a real organization/unit/city name, but short enough that
+// nothing absurd ends up baked into a CSR's Subject.
+const maxSubjectFieldLength = 128
+
+var countryCodePattern = regexp.MustCompile(`^[A-Z]{2}$`)
+
+// validateSubject checks the optional certificate-subject fields
+// (organization, organizational unit, country, state, locality) collected
+// alongside domains. All are optional — many CAs only care about
+// CommonName/SANs — but if given, country must be a real ISO 3166-1
+// alpha-2 code (what X.509 and every CA expects there) rather than
+// whatever a user happens to type, and none may be absurdly long.
+func validateSubject(country, organization, organizationalUnit, state, locality string) error {
+	if country != "" && !countryCodePattern.MatchString(country) {
+		return fmt.Errorf("country must be a 2-letter ISO code (e.g. US, TR), got %q", country)
+	}
+	for name, v := range map[string]string{
+		"organization":        organization,
+		"organizational_unit": organizationalUnit,
+		"state":               state,
+		"locality":            locality,
+	} {
+		if len(v) > maxSubjectFieldLength {
+			return fmt.Errorf("%s must be at most %d characters", name, maxSubjectFieldLength)
+		}
+	}
+	return nil
+}
+
 type Service struct {
 	orders      Store
 	certs       certificate.Store
 	keys        secrets.KeyManager
-	authorities map[string]ca.Authority
+	authorities *ca.Registry
 }
 
-func NewService(orders Store, certs certificate.Store, keys secrets.KeyManager, authorities map[string]ca.Authority) *Service {
+func NewService(orders Store, certs certificate.Store, keys secrets.KeyManager, authorities *ca.Registry) *Service {
 	return &Service{orders: orders, certs: certs, keys: keys, authorities: authorities}
 }
 
 func (s *Service) Create(ctx context.Context, req CreateRequest) (Order, error) {
-	authority, ok := s.authorities[req.CAProvider]
+	authority, ok := s.authorities.Get(req.CAProvider)
 	if !ok {
 		return Order{}, fmt.Errorf("unknown ca_provider %q", req.CAProvider)
 	}
 	if err := validateDomains(req.Domains); err != nil {
+		return Order{}, err
+	}
+	if err := validateSubject(req.Country, req.Organization, req.OrganizationalUnit, req.State, req.Locality); err != nil {
 		return Order{}, err
 	}
 	if req.KeyAlgorithm == "" {
@@ -77,7 +110,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Order, error) 
 		return Order{}, fmt.Errorf("provision key: %w", err)
 	}
 
-	csrPEM, err := buildCSR(ctx, s.keys, keyRef, req.Domains)
+	subject := buildSubject(req.Country, req.Organization, req.OrganizationalUnit, req.State, req.Locality)
+	csrPEM, err := buildCSR(ctx, s.keys, keyRef, req.Domains, subject)
 	if err != nil {
 		return Order{}, fmt.Errorf("build CSR: %w", err)
 	}
@@ -88,16 +122,21 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Order, error) 
 	}
 
 	return s.orders.Create(ctx, Order{
-		RequestedBy:      req.RequestedBy,
-		OwningTeam:       req.OwningTeam,
-		Domains:          req.Domains,
-		CAProvider:       req.CAProvider,
-		ValidationMethod: req.ValidationMethod,
-		KeyAlgorithm:     req.KeyAlgorithm,
-		Status:           StatusAwaitingValidation,
-		Challenges:       po,
-		KeyRef:           keyRef,
-		CSRPEM:           csrPEM,
+		RequestedBy:        req.RequestedBy,
+		OwningTeam:         req.OwningTeam,
+		Domains:            req.Domains,
+		CAProvider:         req.CAProvider,
+		ValidationMethod:   req.ValidationMethod,
+		KeyAlgorithm:       req.KeyAlgorithm,
+		Status:             StatusAwaitingValidation,
+		Challenges:         po,
+		KeyRef:             keyRef,
+		CSRPEM:             csrPEM,
+		Organization:       req.Organization,
+		OrganizationalUnit: req.OrganizationalUnit,
+		Country:            req.Country,
+		State:              req.State,
+		Locality:           req.Locality,
 	})
 }
 
@@ -112,12 +151,13 @@ func (s *Service) Get(ctx context.Context, id string) (Order, error) {
 // Presetting CertificateID is what tells Validate this order renews a
 // certificate in place rather than creating one.
 func (s *Service) CreateRenewal(ctx context.Context, cert certificate.Certificate, requestedBy string) (Order, error) {
-	authority, ok := s.authorities[cert.CAProvider]
+	authority, ok := s.authorities.Get(cert.CAProvider)
 	if !ok {
 		return Order{}, fmt.Errorf("unknown ca_provider %q", cert.CAProvider)
 	}
 
-	csrPEM, err := buildCSR(ctx, s.keys, cert.KeyRef, cert.SANs)
+	subject := buildSubject(cert.Country, cert.Organization, cert.OrganizationalUnit, cert.State, cert.Locality)
+	csrPEM, err := buildCSR(ctx, s.keys, cert.KeyRef, cert.SANs, subject)
 	if err != nil {
 		return Order{}, fmt.Errorf("build CSR: %w", err)
 	}
@@ -128,17 +168,22 @@ func (s *Service) CreateRenewal(ctx context.Context, cert certificate.Certificat
 	}
 
 	return s.orders.Create(ctx, Order{
-		RequestedBy:      requestedBy,
-		OwningTeam:       cert.OwningTeam,
-		Domains:          cert.SANs,
-		CAProvider:       cert.CAProvider,
-		ValidationMethod: cert.ValidationMethod,
-		KeyAlgorithm:     cert.KeyAlgorithm,
-		Status:           StatusAwaitingValidation,
-		Challenges:       po,
-		KeyRef:           cert.KeyRef,
-		CSRPEM:           csrPEM,
-		CertificateID:    cert.ID,
+		RequestedBy:        requestedBy,
+		OwningTeam:         cert.OwningTeam,
+		Domains:            cert.SANs,
+		CAProvider:         cert.CAProvider,
+		ValidationMethod:   cert.ValidationMethod,
+		KeyAlgorithm:       cert.KeyAlgorithm,
+		Status:             StatusAwaitingValidation,
+		Challenges:         po,
+		KeyRef:             cert.KeyRef,
+		CSRPEM:             csrPEM,
+		CertificateID:      cert.ID,
+		Organization:       cert.Organization,
+		OrganizationalUnit: cert.OrganizationalUnit,
+		Country:            cert.Country,
+		State:              cert.State,
+		Locality:           cert.Locality,
 	})
 }
 
@@ -156,7 +201,14 @@ func (s *Service) Validate(ctx context.Context, id string) (Order, error) {
 		return o, nil
 	}
 
-	authority := s.authorities[o.CAProvider]
+	authority, ok := s.authorities.Get(o.CAProvider)
+	if !ok {
+		// The provider that started this order was removed or reconfigured
+		// out from under it (integration settings are editable at runtime —
+		// see internal/api's integration handlers) — fail the order rather
+		// than dereferencing a nil Authority.
+		return s.fail(ctx, o, fmt.Sprintf("ca_provider %q is no longer configured", o.CAProvider))
+	}
 	po, err := authority.CheckChallenge(ctx, o.Challenges)
 	o.Challenges = po
 	o.AttemptCount++
@@ -198,19 +250,24 @@ func (s *Service) Validate(ctx context.Context, id string) (Order, error) {
 		}
 	} else {
 		cert, err := s.certs.Create(ctx, certificate.Certificate{
-			CommonName:       o.Domains[0],
-			SANs:             o.Domains,
-			CAProvider:       o.CAProvider,
-			ValidationMethod: o.ValidationMethod,
-			Status:           certificate.StatusActive,
-			NotBefore:        issued.NotBefore,
-			NotAfter:         issued.NotAfter,
-			KeyAlgorithm:     o.KeyAlgorithm,
-			KeyRef:           o.KeyRef,
-			CAReference:      issued.CAReference,
-			OwningTeam:       o.OwningTeam,
-			AutoRenew:        true,
-			RenewBeforeDays:  30,
+			CommonName:         o.Domains[0],
+			SANs:               o.Domains,
+			CAProvider:         o.CAProvider,
+			ValidationMethod:   o.ValidationMethod,
+			Status:             certificate.StatusActive,
+			NotBefore:          issued.NotBefore,
+			NotAfter:           issued.NotAfter,
+			KeyAlgorithm:       o.KeyAlgorithm,
+			KeyRef:             o.KeyRef,
+			CAReference:        issued.CAReference,
+			OwningTeam:         o.OwningTeam,
+			AutoRenew:          true,
+			RenewBeforeDays:    30,
+			Organization:       o.Organization,
+			OrganizationalUnit: o.OrganizationalUnit,
+			Country:            o.Country,
+			State:              o.State,
+			Locality:           o.Locality,
 		})
 		if err != nil {
 			return s.fail(ctx, o, fmt.Sprintf("store certificate: %v", err))
@@ -238,14 +295,39 @@ func (s *Service) Validate(ctx context.Context, id string) (Order, error) {
 	return o, nil
 }
 
-func buildCSR(ctx context.Context, keys secrets.KeyManager, keyRef string, domains []string) (string, error) {
+// buildSubject turns the optional, flat Country/Organization/
+// OrganizationalUnit/State/Locality strings into the []string-per-field
+// shape pkix.Name expects, omitting any field that's empty rather than
+// encoding it as an empty RDN.
+func buildSubject(country, organization, organizationalUnit, state, locality string) pkix.Name {
+	var subject pkix.Name
+	if country != "" {
+		subject.Country = []string{country}
+	}
+	if organization != "" {
+		subject.Organization = []string{organization}
+	}
+	if organizationalUnit != "" {
+		subject.OrganizationalUnit = []string{organizationalUnit}
+	}
+	if state != "" {
+		subject.Province = []string{state}
+	}
+	if locality != "" {
+		subject.Locality = []string{locality}
+	}
+	return subject
+}
+
+func buildCSR(ctx context.Context, keys secrets.KeyManager, keyRef string, domains []string, subject pkix.Name) (string, error) {
 	signer, err := keys.Signer(ctx, keyRef)
 	if err != nil {
 		return "", fmt.Errorf("load signer: %w", err)
 	}
 
+	subject.CommonName = domains[0]
 	template := &x509.CertificateRequest{
-		Subject:  pkix.Name{CommonName: domains[0]},
+		Subject:  subject,
 		DNSNames: domains,
 	}
 	der, err := x509.CreateCertificateRequest(rand.Reader, template, signer)

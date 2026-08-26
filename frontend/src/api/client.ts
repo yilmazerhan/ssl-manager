@@ -12,6 +12,11 @@ export interface Certificate {
   auto_renew: boolean;
   renew_before_days: number;
   notify_emails?: string[];
+  organization?: string;
+  organizational_unit?: string;
+  country?: string;
+  state?: string;
+  locality?: string;
   created_at: string;
   updated_at: string;
 }
@@ -48,6 +53,11 @@ export interface CertificateOrder {
   certificate_id?: string;
   error?: string;
   attempt_count: number;
+  organization?: string;
+  organizational_unit?: string;
+  country?: string;
+  state?: string;
+  locality?: string;
   created_at: string;
   completed_at?: string;
 }
@@ -58,6 +68,11 @@ export interface CreateOrderRequest {
   ca_provider: string;
   validation_method: string;
   key_algorithm?: string;
+  organization?: string;
+  organizational_unit?: string;
+  country?: string;
+  state?: string;
+  locality?: string;
 }
 
 export interface AuditEntry {
@@ -95,19 +110,25 @@ export interface IntegrationsStatus {
   zerossl: {
     configured: boolean;
     base_url: string;
+    api_key_set: boolean;
   };
   dns01: {
     provider: string;
     configured: boolean;
+    token_set: boolean;
   };
   selfsigned: {
     available: boolean;
     validity_period: string;
+    validity_days: number;
   };
   adcs: {
     configured: boolean;
     base_url: string;
     template: string;
+    username: string;
+    allow_basic_auth: boolean;
+    password_set: boolean;
   };
 }
 
@@ -261,6 +282,16 @@ export const api = {
     request<{ key: string }>(`/users/${id}/api-keys`, { method: "POST", body: JSON.stringify({ name, scopes }) }),
 
   getIntegrations: () => request<IntegrationsStatus>("/integrations"),
+  updateLetsEncrypt: (body: { environment: string; directory_url: string; contact_email: string }) =>
+    request<{ status: string }>("/integrations/letsencrypt", { method: "PUT", body: JSON.stringify(body) }),
+  updateZeroSSL: (body: { base_url: string; api_key?: string }) =>
+    request<{ status: string }>("/integrations/zerossl", { method: "PUT", body: JSON.stringify(body) }),
+  updateADCS: (body: { base_url: string; template?: string; username?: string; password?: string; allow_basic_auth: boolean }) =>
+    request<{ status: string }>("/integrations/adcs", { method: "PUT", body: JSON.stringify(body) }),
+  updateDNS01: (body: { provider: string; token?: string }) =>
+    request<{ status: string; warning?: string }>("/integrations/dns01", { method: "PUT", body: JSON.stringify(body) }),
+  updateSelfSigned: (body: { validity_days: number }) =>
+    request<{ status: string }>("/integrations/selfsigned", { method: "PUT", body: JSON.stringify(body) }),
   getSummaryReport: () => request<SummaryReport>("/reports/summary"),
 
   createScan: (body: CreateScanRequest) => request<DiscoveryScan>("/discovery/scans", { method: "POST", body: JSON.stringify(body) }),

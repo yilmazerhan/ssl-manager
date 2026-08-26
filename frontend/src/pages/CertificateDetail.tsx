@@ -128,6 +128,12 @@ export default function CertificateDetail() {
         <p>
           <strong>Auto-renew:</strong> {cert.auto_renew ? `yes, ${cert.renew_before_days} days before expiry` : "no"}
         </p>
+        {(cert.organization || cert.organizational_unit || cert.locality || cert.state || cert.country) && (
+          <p>
+            <strong>Subject:</strong>{" "}
+            {[cert.organization, cert.organizational_unit, cert.locality, cert.state, cert.country].filter(Boolean).join(", ")}
+          </p>
+        )}
 
         <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
           {hasScope("certs:export") && (

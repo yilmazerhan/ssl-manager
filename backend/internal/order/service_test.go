@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -59,7 +60,7 @@ func testService(t *testing.T) (*Service, string) {
 
 	certs := certificate.NewPostgresStore(pool)
 	orders := NewPostgresStore(pool)
-	authorities := ca.Registry(&fakeInstantAuthority{})
+	authorities := ca.NewRegistry(&fakeInstantAuthority{})
 	return NewService(orders, certs, &fakeKeyManager{key: mustGenerateRSAKey(t)}, authorities), userID
 }
 
@@ -183,6 +184,43 @@ func TestValidateDomains_RejectsTooManyDomains(t *testing.T) {
 	}
 	if err := validateDomains(domains); err == nil {
 		t.Errorf("expected more than %d domains to be rejected", maxDomainsPerOrder)
+	}
+}
+
+func TestValidateSubject_AllFieldsOptional(t *testing.T) {
+	if err := validateSubject("", "", "", "", ""); err != nil {
+		t.Errorf("expected an entirely empty subject to be accepted, got: %v", err)
+	}
+}
+
+func TestValidateSubject_AcceptsRealisticValues(t *testing.T) {
+	if err := validateSubject("US", "Acme Corp", "Platform Engineering", "California", "San Francisco"); err != nil {
+		t.Errorf("expected realistic subject fields to be accepted, got: %v", err)
+	}
+}
+
+func TestValidateSubject_RejectsMalformedCountryCode(t *testing.T) {
+	bad := []string{"USA", "u", "United States", "12"}
+	for _, c := range bad {
+		if err := validateSubject(c, "", "", "", ""); err == nil {
+			t.Errorf("expected country %q to be rejected as not a 2-letter ISO code", c)
+		}
+	}
+}
+
+func TestValidateSubject_RejectsOverlongFields(t *testing.T) {
+	tooLong := strings.Repeat("a", maxSubjectFieldLength+1)
+	if err := validateSubject("", tooLong, "", "", ""); err == nil {
+		t.Errorf("expected an overlong organization to be rejected")
+	}
+	if err := validateSubject("", "", tooLong, "", ""); err == nil {
+		t.Errorf("expected an overlong organizational unit to be rejected")
+	}
+	if err := validateSubject("", "", "", tooLong, ""); err == nil {
+		t.Errorf("expected an overlong state to be rejected")
+	}
+	if err := validateSubject("", "", "", "", tooLong); err == nil {
+		t.Errorf("expected an overlong locality to be rejected")
 	}
 }
 
