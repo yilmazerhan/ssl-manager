@@ -125,6 +125,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	mux.Handle("GET /api/v1/certificates/{id}", authed(auth.RequireScope(auth.ScopeCertsRead)(http.HandlerFunc(h.getCertificate))))
 	mux.Handle("GET /api/v1/certificates/{id}/history", authed(auth.RequireScope(auth.ScopeCertsRead)(http.HandlerFunc(h.certificateHistory))))
 	mux.Handle("GET /api/v1/certificates/{id}/audit", authed(auth.RequireScope(auth.ScopeCertsRead)(http.HandlerFunc(h.certificateAudit))))
+	mux.Handle("GET /api/v1/certificates/{id}/posture", authed(auth.RequireScope(auth.ScopeCertsRead)(http.HandlerFunc(h.certificatePosture))))
 	mux.Handle("POST /api/v1/certificates/{id}/download-token", authed(auth.RequireScope(auth.ScopeCertsExport)(http.HandlerFunc(h.issueDownloadToken))))
 	mux.Handle("GET /api/v1/certificates/{id}/download", authed(auth.RequireScope(auth.ScopeCertsExport)(http.HandlerFunc(h.downloadCertificate))))
 	mux.Handle("POST /api/v1/certificates/{id}/renew", authed(auth.RequireScope(auth.ScopeCertsIssue)(http.HandlerFunc(h.renewCertificate))))

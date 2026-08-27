@@ -31,6 +31,18 @@ export interface CertificateVersion {
   issued_at: string;
 }
 
+export interface CertificatePosture {
+  signature_algorithm: string;
+  key_usage: string[];
+  ext_key_usage: string[];
+  tls_versions_supported: string[];
+  cipher_suite?: string;
+  ocsp_stapled: boolean;
+  reachable: boolean;
+  probe_error?: string;
+  probed_at: string;
+}
+
 export interface Challenge {
   domain: string;
   type: string;
@@ -262,6 +274,7 @@ export const api = {
   getCertificate: (id: string) => request<Certificate>(`/certificates/${id}`),
   getHistory: (id: string) => request<CertificateVersion[]>(`/certificates/${id}/history`),
   getAudit: (id: string) => request<AuditEntry[]>(`/certificates/${id}/audit`),
+  getCertificatePosture: (id: string) => request<CertificatePosture>(`/certificates/${id}/posture`),
   renewCertificate: (id: string) => request<CertificateOrder>(`/certificates/${id}/renew`, { method: "POST" }),
   revokeCertificate: (id: string) => request<{ status: string }>(`/certificates/${id}/revoke`, { method: "POST" }),
 

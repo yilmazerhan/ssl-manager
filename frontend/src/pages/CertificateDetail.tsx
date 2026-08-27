@@ -1,8 +1,19 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { api, AuditEntry, Certificate, CertificateVersion, NotificationLogEntry, downloadPEM } from "../api/client";
+import {
+  api,
+  AuditEntry,
+  Certificate,
+  CertificatePosture,
+  CertificateVersion,
+  NotificationLogEntry,
+  downloadPEM,
+} from "../api/client";
 import StatusPill from "../components/StatusPill";
 import { useAuth } from "../auth/AuthContext";
+
+const WEAK_SIGNATURE_ALGORITHMS = ["SHA1", "MD5", "MD2"];
+const WEAK_TLS_VERSIONS = ["TLS 1.0", "TLS 1.1"];
 
 export default function CertificateDetail() {
   const { id } = useParams<{ id: string }>();
@@ -12,6 +23,9 @@ export default function CertificateDetail() {
   const [auditLog, setAuditLog] = useState<AuditEntry[]>([]);
   const [notifyLog, setNotifyLog] = useState<NotificationLogEntry[]>([]);
   const [notifyEmailsInput, setNotifyEmailsInput] = useState("");
+  const [posture, setPosture] = useState<CertificatePosture | null>(null);
+  const [postureLoading, setPostureLoading] = useState(false);
+  const [postureError, setPostureError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -30,6 +44,17 @@ export default function CertificateDetail() {
   }
 
   useEffect(load, [id]);
+
+  useEffect(() => {
+    if (!id) return;
+    setPostureLoading(true);
+    setPostureError(null);
+    api
+      .getCertificatePosture(id)
+      .then(setPosture)
+      .catch((e) => setPostureError(e.message))
+      .finally(() => setPostureLoading(false));
+  }, [id]);
 
   async function handleSaveNotifyEmails() {
     if (!id) return;
@@ -173,6 +198,56 @@ export default function CertificateDetail() {
           </button>
         </div>
       )}
+
+      <h3>Crypto &amp; protocol posture</h3>
+      <div className="card">
+        {postureLoading && !posture && <p>Checking the certificate and probing the live TLS endpoint…</p>}
+        {postureError && <p>Could not compute posture: {postureError}</p>}
+        {posture && (
+          <>
+            <p>
+              <strong>Signature algorithm:</strong> {posture.signature_algorithm}{" "}
+              {WEAK_SIGNATURE_ALGORITHMS.some((w) => posture.signature_algorithm.toUpperCase().includes(w)) && (
+                <span className="pill critical">weak</span>
+              )}
+            </p>
+            <p>
+              <strong>Key usage:</strong> {posture.key_usage.join(", ") || "—"}
+            </p>
+            {posture.ext_key_usage.length > 0 && (
+              <p>
+                <strong>Extended key usage:</strong> {posture.ext_key_usage.join(", ")}
+              </p>
+            )}
+            <p>
+              <strong>TLS versions observed:</strong>{" "}
+              {posture.reachable ? (
+                posture.tls_versions_supported.map((v) => (
+                  <span key={v} className={`pill ${WEAK_TLS_VERSIONS.includes(v) ? "critical" : "ok"}`} style={{ marginRight: 6 }}>
+                    {v}
+                  </span>
+                ))
+              ) : (
+                <span className="pill warn">{posture.probe_error || "not reachable"}</span>
+              )}
+            </p>
+            {posture.reachable && (
+              <>
+                <p>
+                  <strong>Cipher suite:</strong> {posture.cipher_suite || "—"}
+                </p>
+                <p>
+                  <strong>OCSP stapling:</strong>{" "}
+                  <span className={`pill ${posture.ocsp_stapled ? "ok" : "warn"}`}>
+                    {posture.ocsp_stapled ? "stapled" : "not stapled"}
+                  </span>
+                </p>
+              </>
+            )}
+            <p style={{ fontSize: 12, color: "var(--muted)" }}>Probed {new Date(posture.probed_at).toLocaleString()}</p>
+          </>
+        )}
+      </div>
 
       <h3>Version history</h3>
       <table>

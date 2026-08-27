@@ -74,6 +74,28 @@ func (h *handlers) certificateHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, versions)
 }
 
+// certificatePosture serves the crypto/TLS detail panel on the certificate
+// detail page: signature algorithm and key usage are parsed from the
+// current issued cert, and TLS versions/cipher/OCSP-stapling come from a
+// live handshake probe against the certificate's own primary domain.
+func (h *handlers) certificatePosture(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	version, err := h.deps.Certs.LatestVersion(r.Context(), cert.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load the current certificate version")
+		return
+	}
+	posture, err := certificate.ComputePosture(r.Context(), version.PEMCert, cert.CommonName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not compute certificate posture")
+		return
+	}
+	writeJSON(w, http.StatusOK, posture)
+}
+
 func (h *handlers) certificateAudit(w http.ResponseWriter, r *http.Request) {
 	cert, ok := h.loadCertificateForTeam(w, r)
 	if !ok {
