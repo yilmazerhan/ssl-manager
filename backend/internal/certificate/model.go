@@ -22,6 +22,12 @@ type Certificate struct {
 	NotAfter         time.Time `json:"not_after"`
 	KeyAlgorithm     string    `json:"key_algorithm"`
 	KeyRef           string    `json:"key_ref"`
+	// KeyExportable is true only if this certificate's Vault key was
+	// created with exportable=true (order.CreateRequest.ExportableKey at
+	// issuance) — permanent, since Vault Transit fixes it at key creation.
+	// A Kubernetes sync target (internal/k8s) can only be attached when
+	// this is true: syncing a Secret needs the raw private key.
+	KeyExportable bool `json:"key_exportable"`
 	// CAReference is provider-specific state needed to act on this
 	// certificate at the CA again (e.g. ZeroSSL's certificate ID); empty
 	// for providers that don't need one (Let's Encrypt) or for

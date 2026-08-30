@@ -21,6 +21,7 @@ import (
 	"github.com/yilmazerhan/ssl-manager/backend/internal/db"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/discovery"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/downloadtoken"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/k8s"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/notify"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/order"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/renewal"
@@ -91,6 +92,7 @@ func main() {
 	if err := discoveryService.RecoverInterruptedScans(ctx); err != nil {
 		log.Printf("discovery: recover interrupted scans: %v", err)
 	}
+	go discoveryService.Run(ctx)
 
 	// CA/DNS integration settings are editable at runtime from here on
 	// (see internal/api's integration handlers) — the database, not the
@@ -183,6 +185,14 @@ func main() {
 
 	orderService := order.NewService(orders, certs, keyManager, authorities)
 
+	k8sService := k8s.NewService(k8s.NewPostgresStore(pool), certs, secretStore, keyManager)
+	orderService.SetOnIssued(func(_ context.Context, certificateID string) {
+		// Runs detached from the issuance/renewal request's own context —
+		// an unreachable or slow cluster must never hold up or fail the
+		// request that triggered it (see k8s.Service.SyncCertificate).
+		go k8sService.SyncCertificate(context.Background(), certificateID)
+	})
+
 	notifier := buildNotifier(cfg)
 	reminderSettings := renewal.NewPostgresSettingsStore(pool)
 	notifyLog := renewal.NewPostgresNotifyLogStore(pool)
@@ -218,6 +228,7 @@ func main() {
 		Certs:                         certs,
 		Orders:                        orderService,
 		Renewal:                       renewalEngine,
+		K8s:                           k8sService,
 		Users:                         users,
 		Sessions:                      sessions,
 		APIKeys:                       apiKeys,

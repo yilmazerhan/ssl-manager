@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, Certificate, DiscoveryResult, Stats } from "../api/client";
+import { api, Certificate, DiscoveryResult, Stats, VulnerabilitySummary } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import StatusPill from "../components/StatusPill";
 import {
   GridIcon,
   ShieldIcon,
+  ShieldCheckIcon,
   ClockAlertIcon,
   CalendarIcon,
   XCircleIcon,
@@ -25,6 +26,7 @@ export default function Dashboard() {
   const [certs, setCerts] = useState<Certificate[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [mismatches, setMismatches] = useState<DiscoveryResult[]>([]);
+  const [vulns, setVulns] = useState<VulnerabilitySummary | null>(null);
   const [notifications, setNotifications] = useState<{ sent: number; failed: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -35,6 +37,7 @@ export default function Dashboard() {
       api.getSummaryReport().then((r) => {
         setStats(r.certificates);
         if (r.discovery_mismatches !== undefined) setMismatches(r.discovery_mismatches ?? []);
+        if (r.vulnerabilities !== undefined) setVulns(r.vulnerabilities ?? null);
         if (r.notifications_sent_30d !== undefined || r.notifications_failed_30d !== undefined) {
           setNotifications({ sent: r.notifications_sent_30d ?? 0, failed: r.notifications_failed_30d ?? 0 });
         }
@@ -167,6 +170,44 @@ export default function Dashboard() {
             </div>
           )}
         </div>
+      )}
+
+      {isAdmin && vulns && vulns.total_endpoints > 0 && (
+        <>
+          <div className="section-heading">
+            <ShieldCheckIcon width={16} height={16} />
+            <h3>TLS posture (network discovery)</h3>
+          </div>
+          <p className="page-lede" style={{ marginTop: -4 }}>
+            Across the {vulns.total_endpoints} endpoint{vulns.total_endpoints === 1 ? "" : "s"} most recently seen by discovery scans.
+          </p>
+          <div className="stat-grid">
+            <div className="stat-tile critical">
+              <div className="stat-icon">
+                <AlertTriangleIcon width={17} height={17} />
+              </div>
+              <div className="stat-value">{vulns.weak_tls_version}</div>
+              <div className="stat-label">Serving TLS 1.0/1.1</div>
+            </div>
+            <div className="stat-tile critical">
+              <div className="stat-icon">
+                <AlertTriangleIcon width={17} height={17} />
+              </div>
+              <div className="stat-value">{vulns.weak_signature_algorithm}</div>
+              <div className="stat-label">Weak signature algorithm</div>
+            </div>
+            <div className="stat-tile critical">
+              <div className="stat-icon">
+                <XCircleIcon width={17} height={17} />
+              </div>
+              <div className="stat-value">{vulns.expired_certificate}</div>
+              <div className="stat-label">Serving an expired certificate</div>
+            </div>
+          </div>
+          <p className="page-lede" style={{ marginTop: 8 }}>
+            <Link to="/admin/discovery">See per-endpoint detail →</Link>
+          </p>
+        </>
       )}
 
       <div className="section-heading">

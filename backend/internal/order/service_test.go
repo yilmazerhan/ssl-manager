@@ -76,7 +76,7 @@ type fakeKeyManager struct {
 	key *rsa.PrivateKey
 }
 
-func (f *fakeKeyManager) EnsureKey(context.Context, string, string) error { return nil }
+func (f *fakeKeyManager) EnsureKey(context.Context, string, string, bool) error { return nil }
 func (f *fakeKeyManager) Signer(context.Context, string) (crypto.Signer, error) {
 	return f.key, nil
 }

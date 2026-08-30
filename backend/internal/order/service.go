@@ -84,10 +84,23 @@ type Service struct {
 	certs       certificate.Store
 	keys        secrets.KeyManager
 	authorities *ca.Registry
+	// onIssued, if set, runs after Validate reaches StatusIssued — for a
+	// new certificate or a renewal alike, since both paths converge there.
+	// It's how an optional post-issuance side effect (syncing to a
+	// Kubernetes Secret, see internal/k8s) plugs in without this package
+	// depending on it.
+	onIssued func(ctx context.Context, certificateID string)
 }
 
 func NewService(orders Store, certs certificate.Store, keys secrets.KeyManager, authorities *ca.Registry) *Service {
 	return &Service{orders: orders, certs: certs, keys: keys, authorities: authorities}
+}
+
+// SetOnIssued registers fn as Validate's post-issuance hook (see the
+// onIssued field doc). Call once during startup wiring, before the
+// service handles any request.
+func (s *Service) SetOnIssued(fn func(ctx context.Context, certificateID string)) {
+	s.onIssued = fn
 }
 
 func (s *Service) Create(ctx context.Context, req CreateRequest) (Order, error) {
@@ -106,7 +119,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Order, error) 
 	}
 
 	keyRef := "order-" + uuid.NewString()
-	if err := s.keys.EnsureKey(ctx, keyRef, req.KeyAlgorithm); err != nil {
+	if err := s.keys.EnsureKey(ctx, keyRef, req.KeyAlgorithm, req.ExportableKey); err != nil {
 		return Order{}, fmt.Errorf("provision key: %w", err)
 	}
 
@@ -137,6 +150,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Order, error) 
 		Country:            req.Country,
 		State:              req.State,
 		Locality:           req.Locality,
+		KeyExportable:      req.ExportableKey,
 	})
 }
 
@@ -259,6 +273,7 @@ func (s *Service) Validate(ctx context.Context, id string) (Order, error) {
 			NotAfter:           issued.NotAfter,
 			KeyAlgorithm:       o.KeyAlgorithm,
 			KeyRef:             o.KeyRef,
+			KeyExportable:      o.KeyExportable,
 			CAReference:        issued.CAReference,
 			OwningTeam:         o.OwningTeam,
 			AutoRenew:          true,
@@ -291,6 +306,9 @@ func (s *Service) Validate(ctx context.Context, id string) (Order, error) {
 	o.CompletedAt = &now
 	if err := s.orders.Update(ctx, o); err != nil {
 		return Order{}, err
+	}
+	if s.onIssued != nil {
+		s.onIssued(ctx, o.CertificateID)
 	}
 	return o, nil
 }

@@ -26,7 +26,11 @@ type KeyManager interface {
 	// EnsureKey creates the named Transit key if it doesn't already exist.
 	// Calling it again for an existing key (the renewal "reuse the existing
 	// key" policy from docs/plan.html section 06) is a no-op, not an error.
-	EnsureKey(ctx context.Context, name, algorithm string) error
+	// exportable is fixed permanently at creation — Vault Transit itself
+	// won't let it change afterward — and only matters the first time a
+	// given name is created; a later EnsureKey call for the same name with
+	// a different exportable value has no effect on the existing key.
+	EnsureKey(ctx context.Context, name, algorithm string, exportable bool) error
 	// Signer returns a crypto.Signer backed by the named Transit key. Every
 	// Sign call is a network round trip to Vault; the private key never
 	// leaves it.
@@ -62,7 +66,7 @@ func transitKeyType(algorithm string) (string, error) {
 	}
 }
 
-func (v *VaultKeyManager) EnsureKey(ctx context.Context, name, algorithm string) error {
+func (v *VaultKeyManager) EnsureKey(ctx context.Context, name, algorithm string, exportable bool) error {
 	keyType, err := transitKeyType(algorithm)
 	if err != nil {
 		return err
@@ -77,9 +81,13 @@ func (v *VaultKeyManager) EnsureKey(ctx context.Context, name, algorithm string)
 	}
 
 	_, err = v.client.Logical().WriteWithContext(ctx, fmt.Sprintf("%s/keys/%s", v.mount, name), map[string]interface{}{
-		"type":                   keyType,
-		"exportable":             false,
-		"allow_plaintext_backup": false,
+		"type": keyType,
+		// allow_plaintext_backup matches exportable: a key permanently
+		// marked exportable can go out to a Kubernetes Secret (see
+		// internal/k8s), so there's no separate reason to keep its backup
+		// endpoint locked while its export endpoint is open.
+		"exportable":             exportable,
+		"allow_plaintext_backup": exportable,
 	})
 	if err != nil {
 		return fmt.Errorf("vault: create key %q: %w", name, err)
@@ -87,13 +95,17 @@ func (v *VaultKeyManager) EnsureKey(ctx context.Context, name, algorithm string)
 	return nil
 }
 
-func (v *VaultKeyManager) Signer(ctx context.Context, name string) (crypto.Signer, error) {
+// latestVersionOf reads a Transit key's metadata and returns its
+// latest_version as a string — shared by Signer (which needs it to find
+// the current public key) and ExportPrivateKey (which needs it to export
+// the matching private key).
+func (v *VaultKeyManager) latestVersionOf(ctx context.Context, name string) (map[string]interface{}, string, error) {
 	secret, err := v.client.Logical().ReadWithContext(ctx, fmt.Sprintf("%s/keys/%s", v.mount, name))
 	if err != nil {
-		return nil, fmt.Errorf("vault: read key %q: %w", name, err)
+		return nil, "", fmt.Errorf("vault: read key %q: %w", name, err)
 	}
 	if secret == nil {
-		return nil, fmt.Errorf("vault: key %q does not exist", name)
+		return nil, "", fmt.Errorf("vault: key %q does not exist", name)
 	}
 
 	latestVersion, ok := secret.Data["latest_version"].(json.Number)
@@ -103,10 +115,18 @@ func (v *VaultKeyManager) Signer(ctx context.Context, name string) (crypto.Signe
 	} else if f, ok := secret.Data["latest_version"].(float64); ok {
 		versionStr = strconv.Itoa(int(f))
 	} else {
-		return nil, fmt.Errorf("vault: key %q missing latest_version", name)
+		return nil, "", fmt.Errorf("vault: key %q missing latest_version", name)
+	}
+	return secret.Data, versionStr, nil
+}
+
+func (v *VaultKeyManager) Signer(ctx context.Context, name string) (crypto.Signer, error) {
+	data, versionStr, err := v.latestVersionOf(ctx, name)
+	if err != nil {
+		return nil, err
 	}
 
-	keys, ok := secret.Data["keys"].(map[string]interface{})
+	keys, ok := data["keys"].(map[string]interface{})
 	if !ok {
 		return nil, fmt.Errorf("vault: key %q missing keys map", name)
 	}
@@ -129,6 +149,37 @@ func (v *VaultKeyManager) Signer(ctx context.Context, name string) (crypto.Signe
 	}
 
 	return &transitSigner{client: v.client, mount: v.mount, name: name, public: pub}, nil
+}
+
+// ExportPrivateKey returns the named Transit key's current-version private
+// key as PEM. It only ever succeeds for a key created with exportable=true
+// (see EnsureKey) — Vault itself refuses the export endpoint otherwise.
+// Deliberately not part of the KeyManager interface every CA-issuance path
+// depends on: this exists solely for internal/k8s to build a Kubernetes TLS
+// Secret, which is the one place in this platform a private key is
+// allowed to leave Vault at all.
+func (v *VaultKeyManager) ExportPrivateKey(ctx context.Context, name string) ([]byte, error) {
+	_, versionStr, err := v.latestVersionOf(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+
+	secret, err := v.client.Logical().ReadWithContext(ctx, fmt.Sprintf("%s/export/signing-key/%s/%s", v.mount, name, versionStr))
+	if err != nil {
+		return nil, fmt.Errorf("vault: export key %q: %w", name, err)
+	}
+	if secret == nil {
+		return nil, fmt.Errorf("vault: export key %q: not found, or not created with exportable=true", name)
+	}
+	keys, ok := secret.Data["keys"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("vault: export key %q: missing keys map", name)
+	}
+	pemKey, ok := keys[versionStr].(string)
+	if !ok || pemKey == "" {
+		return nil, fmt.Errorf("vault: export key %q: missing version %s", name, versionStr)
+	}
+	return []byte(pemKey), nil
 }
 
 type transitSigner struct {

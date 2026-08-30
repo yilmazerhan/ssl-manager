@@ -42,6 +42,7 @@ export default function NewCertificateWizard() {
   const [country, setCountry] = useState("");
   const [state, setStateField] = useState("");
   const [locality, setLocality] = useState("");
+  const [exportableKey, setExportableKey] = useState(false);
   const [order, setOrder] = useState<CertificateOrder | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
@@ -67,6 +68,7 @@ export default function NewCertificateWizard() {
         country: country || undefined,
         state: state || undefined,
         locality: locality || undefined,
+        exportable_key: exportableKey,
       });
       // "none" (selfsigned) has nothing for anyone to publish or approve —
       // it's already verified at creation time, so skip straight to
@@ -267,6 +269,16 @@ export default function NewCertificateWizard() {
           <p style={{ color: "var(--muted)", fontSize: 13 }}>
             A key pair is generated for this certificate in Vault when you submit — it never leaves the server, not even to us.
           </p>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+            <input type="checkbox" checked={exportableKey} onChange={(e) => setExportableKey(e.target.checked)} />
+            Sync to Kubernetes as a Secret
+          </label>
+          {exportableKey && (
+            <p style={{ color: "var(--muted)", fontSize: 12, marginTop: 4 }}>
+              This makes an exception to the note above: this certificate's key can be exported to build a Kubernetes TLS Secret. This is a
+              one-time choice — it can't be turned on later without re-issuing the certificate.
+            </p>
+          )}
           <button className="secondary" onClick={() => setStep("validation")} style={{ marginRight: 8 }}>
             Back
           </button>

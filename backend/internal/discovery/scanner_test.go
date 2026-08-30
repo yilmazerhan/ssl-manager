@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"slices"
 	"testing"
 	"time"
 )
@@ -149,5 +150,61 @@ func TestProbe_Unreachable(t *testing.T) {
 	result := probe(context.Background(), "127.0.0.1", 1, 500*time.Millisecond)
 	if result.Reachable {
 		t.Fatalf("expected an unreachable port to report Reachable=false")
+	}
+}
+
+func TestProbe_PopulatesSignatureAlgorithmAndCipherSuite(t *testing.T) {
+	addr, _, closeFn := mustSelfSignedTLSListener(t)
+	defer closeFn()
+
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split host:port: %v", err)
+	}
+	var port int
+	fmt.Sscanf(portStr, "%d", &port)
+
+	result := probe(context.Background(), host, port, 2*time.Second)
+	if result.SignatureAlgorithm == "" {
+		t.Errorf("expected a non-empty signature algorithm")
+	}
+	if result.CipherSuite == "" {
+		t.Errorf("expected a non-empty cipher suite")
+	}
+	// A freshly generated, modern-defaults self-signed cert over Go's
+	// default TLS config should never trip either weak-crypto flag.
+	if got := classifyVulnerabilities(result); len(got) != 0 {
+		t.Errorf("expected no vulnerabilities for a modern handshake, got %v", got)
+	}
+}
+
+func TestClassifyVulnerabilities(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	future := time.Now().Add(time.Hour)
+
+	cases := []struct {
+		name string
+		pr   probeResult
+		want []string
+	}{
+		{"clean", probeResult{TLSVersion: "TLS 1.3", SignatureAlgorithm: "SHA256-RSA", NotAfter: &future}, nil},
+		{"weak tls 1.0", probeResult{TLSVersion: "TLS 1.0", SignatureAlgorithm: "SHA256-RSA", NotAfter: &future}, []string{"weak_tls_version"}},
+		{"weak tls 1.1", probeResult{TLSVersion: "TLS 1.1", SignatureAlgorithm: "SHA256-RSA", NotAfter: &future}, []string{"weak_tls_version"}},
+		{"weak signature sha1", probeResult{TLSVersion: "TLS 1.2", SignatureAlgorithm: "SHA1-RSA", NotAfter: &future}, []string{"weak_signature_algorithm"}},
+		{"weak signature md5", probeResult{TLSVersion: "TLS 1.2", SignatureAlgorithm: "MD5-RSA", NotAfter: &future}, []string{"weak_signature_algorithm"}},
+		{"expired", probeResult{TLSVersion: "TLS 1.2", SignatureAlgorithm: "SHA256-RSA", NotAfter: &past}, []string{"expired_certificate"}},
+		{
+			"weak tls, weak signature, and expired all at once",
+			probeResult{TLSVersion: "TLS 1.0", SignatureAlgorithm: "SHA1-RSA", NotAfter: &past},
+			[]string{"weak_tls_version", "weak_signature_algorithm", "expired_certificate"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := classifyVulnerabilities(c.pr)
+			if !slices.Equal(got, c.want) {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
 	}
 }

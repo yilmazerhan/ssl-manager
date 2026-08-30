@@ -37,7 +37,7 @@ func TestLetsEncrypt_FullFlow_HTTP01(t *testing.T) {
 		t.Fatalf("NewVaultKeyManager: %v", err)
 	}
 	keyName := "test-le-" + t.Name()
-	if err := km.EnsureKey(ctx, keyName, "RSA-2048"); err != nil {
+	if err := km.EnsureKey(ctx, keyName, "RSA-2048", false); err != nil {
 		t.Fatalf("EnsureKey: %v", err)
 	}
 	signer, err := km.Signer(ctx, keyName)

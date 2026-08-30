@@ -33,11 +33,11 @@ func TestVaultSignedCSR_RSA(t *testing.T) {
 	ctx := context.Background()
 
 	keyName := "test-rsa-" + t.Name()
-	if err := km.EnsureKey(ctx, keyName, "RSA-2048"); err != nil {
+	if err := km.EnsureKey(ctx, keyName, "RSA-2048", false); err != nil {
 		t.Fatalf("EnsureKey: %v", err)
 	}
 	// Calling it twice must be a no-op, not an error (renewal reuses keys).
-	if err := km.EnsureKey(ctx, keyName, "RSA-2048"); err != nil {
+	if err := km.EnsureKey(ctx, keyName, "RSA-2048", false); err != nil {
 		t.Fatalf("EnsureKey (idempotent call): %v", err)
 	}
 
@@ -71,7 +71,7 @@ func TestVaultSignedCSR_ECDSA(t *testing.T) {
 	ctx := context.Background()
 
 	keyName := "test-ecdsa-" + t.Name()
-	if err := km.EnsureKey(ctx, keyName, "ECDSA-P256"); err != nil {
+	if err := km.EnsureKey(ctx, keyName, "ECDSA-P256", false); err != nil {
 		t.Fatalf("EnsureKey: %v", err)
 	}
 

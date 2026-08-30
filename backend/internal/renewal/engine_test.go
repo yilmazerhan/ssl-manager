@@ -197,7 +197,7 @@ func newFakeKeyManager() *fakeKeyManager {
 	return &fakeKeyManager{key: key}
 }
 
-func (f *fakeKeyManager) EnsureKey(_ context.Context, _, _ string) error { return nil }
+func (f *fakeKeyManager) EnsureKey(_ context.Context, _, _ string, _ bool) error { return nil }
 func (f *fakeKeyManager) Signer(_ context.Context, _ string) (crypto.Signer, error) {
 	return f.key, nil
 }

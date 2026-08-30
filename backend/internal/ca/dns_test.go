@@ -72,7 +72,7 @@ func TestLetsEncrypt_FullFlow_DNS01_Automated(t *testing.T) {
 	}
 
 	keyName := "test-le-dns01-" + t.Name()
-	if err := km.EnsureKey(ctx, keyName, "RSA-2048"); err != nil {
+	if err := km.EnsureKey(ctx, keyName, "RSA-2048", false); err != nil {
 		t.Fatalf("EnsureKey: %v", err)
 	}
 	signer, err := km.Signer(ctx, keyName)

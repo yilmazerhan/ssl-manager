@@ -39,6 +39,12 @@ type Order struct {
 	Country            string `json:"country,omitempty"`
 	State              string `json:"state,omitempty"`
 	Locality           string `json:"locality,omitempty"`
+
+	// KeyExportable carries the new certificate's chosen exportable
+	// setting through from Create to Validate (a different HTTP request,
+	// possibly much later) — it can't be recomputed later since Vault
+	// Transit fixes exportable permanently at key creation.
+	KeyExportable bool `json:"key_exportable,omitempty"`
 }
 
 // Public returns a copy safe to send to a client: the provider's internal
@@ -65,4 +71,9 @@ type CreateRequest struct {
 	Country            string `json:"country"`
 	State              string `json:"state"`
 	Locality           string `json:"locality"`
+	// ExportableKey opts the new certificate's Vault key into being
+	// exportable — see secrets.KeyManager.EnsureKey. It's a one-time,
+	// irreversible choice: only a certificate created with this set can
+	// ever get a Kubernetes Secret target (internal/k8s).
+	ExportableKey bool `json:"exportable_key"`
 }

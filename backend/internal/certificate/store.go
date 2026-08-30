@@ -58,7 +58,7 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 // other.
 const certificateColumns = `
 	id, common_name, sans, ca_provider, validation_method, status, not_before, not_after,
-	key_algorithm, key_ref, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days,
+	key_algorithm, key_ref, key_exportable, coalesce(ca_reference, ''), owning_team, auto_renew, renew_before_days,
 	coalesce(notify_emails, '{}'), coalesce(organization, ''), coalesce(organizational_unit, ''),
 	coalesce(country, ''), coalesce(state, ''), coalesce(locality, ''), created_at, updated_at
 `
@@ -67,11 +67,11 @@ func (s *PostgresStore) Create(ctx context.Context, c Certificate) (Certificate,
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO certificate
 			(common_name, sans, ca_provider, validation_method, status, not_before, not_after,
-			 key_algorithm, key_ref, ca_reference, owning_team, auto_renew, renew_before_days,
+			 key_algorithm, key_ref, key_exportable, ca_reference, owning_team, auto_renew, renew_before_days,
 			 organization, organizational_unit, country, state, locality)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 		RETURNING `+certificateColumns, c.CommonName, c.SANs, c.CAProvider, c.ValidationMethod, c.Status, c.NotBefore, c.NotAfter,
-		c.KeyAlgorithm, c.KeyRef, nullableString(c.CAReference), c.OwningTeam, c.AutoRenew, c.RenewBeforeDays,
+		c.KeyAlgorithm, c.KeyRef, c.KeyExportable, nullableString(c.CAReference), c.OwningTeam, c.AutoRenew, c.RenewBeforeDays,
 		nullableString(c.Organization), nullableString(c.OrganizationalUnit), nullableString(c.Country),
 		nullableString(c.State), nullableString(c.Locality))
 	return scanCertificate(row)
@@ -308,7 +308,7 @@ type rowScanner interface {
 func scanCertificate(row rowScanner) (Certificate, error) {
 	var c Certificate
 	err := row.Scan(&c.ID, &c.CommonName, &c.SANs, &c.CAProvider, &c.ValidationMethod, &c.Status, &c.NotBefore, &c.NotAfter,
-		&c.KeyAlgorithm, &c.KeyRef, &c.CAReference, &c.OwningTeam, &c.AutoRenew, &c.RenewBeforeDays,
+		&c.KeyAlgorithm, &c.KeyRef, &c.KeyExportable, &c.CAReference, &c.OwningTeam, &c.AutoRenew, &c.RenewBeforeDays,
 		&c.NotifyEmails, &c.Organization, &c.OrganizationalUnit, &c.Country, &c.State, &c.Locality,
 		&c.CreatedAt, &c.UpdatedAt)
 	if err != nil {

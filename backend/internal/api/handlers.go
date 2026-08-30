@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -14,6 +16,7 @@ import (
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/discovery"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/downloadtoken"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/k8s"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/order"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/renewal"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/user"
@@ -201,12 +204,262 @@ func (h *handlers) revokeCertificate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.deps.Certs.Revoke(r.Context(), cert.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not revoke certificate")
+	if err := h.revokeOne(r.Context(), cert); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	h.audit(r, "revoke", "certificate", cert.ID, string(auth.ScopeCertsAdmin), nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+}
+
+// revokeOne is revokeCertificate's actual work, split out so bulkRevoke can
+// drive the same CA-then-database order over a whole list of certificates
+// without duplicating it.
+func (h *handlers) revokeOne(ctx context.Context, cert certificate.Certificate) error {
+	if authority, ok := h.deps.Authorities.Get(cert.CAProvider); ok {
+		version, err := h.deps.Certs.LatestVersion(ctx, cert.ID)
+		if err != nil {
+			return fmt.Errorf("could not load certificate material to revoke")
+		}
+		if err := authority.Revoke(ctx, version.PEMCert, cert.CAReference); err != nil {
+			return fmt.Errorf("could not revoke at the certificate authority: %w", err)
+		}
+	}
+	if err := h.deps.Certs.Revoke(ctx, cert.ID); err != nil {
+		return fmt.Errorf("could not revoke certificate")
+	}
+	return nil
+}
+
+// maxBulkItems bounds every bulk endpoint below — a single request that
+// tries to import/revoke/renew thousands of certificates would tie up this
+// handler (and, for renew, kick off that many real CA round trips) for far
+// longer than an HTTP request should reasonably run.
+const maxBulkItems = 500
+
+// loadCertificateForTeamByID is loadCertificateForTeam's check without the
+// http.Request coupling, so bulk handlers can apply the same team-scoping
+// to every id in a request body, not just one from the URL path.
+func (h *handlers) loadCertificateForTeamByID(ctx context.Context, identity auth.Identity, id string) (certificate.Certificate, error) {
+	cert, err := h.deps.Certs.Get(ctx, id)
+	if err != nil {
+		return certificate.Certificate{}, fmt.Errorf("not found")
+	}
+	if !identity.CanAccessTeam(cert.OwningTeam) {
+		return certificate.Certificate{}, fmt.Errorf("not permitted to access this certificate")
+	}
+	return cert, nil
+}
+
+// bulkItemResult is every bulk endpoint's per-item outcome shape — a bulk
+// request only ever entirely succeeds or reports exactly which items
+// failed and why; it never fails the whole request for one bad id.
+type bulkItemResult struct {
+	ID      string `json:"id,omitempty"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+func (h *handlers) bulkRevokeCertificates(w http.ResponseWriter, r *http.Request) {
+	identity, _ := auth.IdentityFromContext(r.Context())
+
+	var req struct {
+		CertificateIDs []string `json:"certificate_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(req.CertificateIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one certificate_id is required")
+		return
+	}
+	if len(req.CertificateIDs) > maxBulkItems {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("at most %d certificates per bulk request, got %d", maxBulkItems, len(req.CertificateIDs)))
+		return
+	}
+
+	results := make([]bulkItemResult, 0, len(req.CertificateIDs))
+	for _, id := range req.CertificateIDs {
+		cert, err := h.loadCertificateForTeamByID(r.Context(), identity, id)
+		if err != nil {
+			results = append(results, bulkItemResult{ID: id, Error: err.Error()})
+			continue
+		}
+		if err := h.revokeOne(r.Context(), cert); err != nil {
+			results = append(results, bulkItemResult{ID: id, Error: err.Error()})
+			continue
+		}
+		h.audit(r, "revoke", "certificate", cert.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{"bulk": true})
+		results = append(results, bulkItemResult{ID: id, Success: true})
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+func (h *handlers) bulkRenewCertificates(w http.ResponseWriter, r *http.Request) {
+	identity, _ := auth.IdentityFromContext(r.Context())
+
+	var req struct {
+		CertificateIDs []string `json:"certificate_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(req.CertificateIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one certificate_id is required")
+		return
+	}
+	if len(req.CertificateIDs) > maxBulkItems {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("at most %d certificates per bulk request, got %d", maxBulkItems, len(req.CertificateIDs)))
+		return
+	}
+
+	results := make([]bulkItemResult, 0, len(req.CertificateIDs))
+	for _, id := range req.CertificateIDs {
+		cert, err := h.loadCertificateForTeamByID(r.Context(), identity, id)
+		if err != nil {
+			results = append(results, bulkItemResult{ID: id, Error: err.Error()})
+			continue
+		}
+		o, err := h.deps.Renewal.RenewNow(r.Context(), cert, identity.UserID)
+		if err != nil {
+			results = append(results, bulkItemResult{ID: id, Error: err.Error()})
+			continue
+		}
+		if o.Status == order.StatusFailed {
+			results = append(results, bulkItemResult{ID: id, Error: o.Error})
+			continue
+		}
+		h.audit(r, "renew_requested", "certificate", cert.ID, string(auth.ScopeCertsIssue), map[string]interface{}{"bulk": true})
+		results = append(results, bulkItemResult{ID: id, Success: true})
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+// bulkImportItemResult echoes back which input item a result belongs to —
+// bulkItemResult's ID is a certificate id, which doesn't exist yet for a
+// failed import, so this identifies by common_name instead.
+type bulkImportItemResult struct {
+	CommonName    string `json:"common_name,omitempty"`
+	CertificateID string `json:"certificate_id,omitempty"`
+	Success       bool   `json:"success"`
+	Error         string `json:"error,omitempty"`
+}
+
+func (h *handlers) bulkImportCertificates(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Certificates []struct {
+			PEMCert    string `json:"pem_cert"`
+			PEMChain   string `json:"pem_chain"`
+			OwningTeam string `json:"owning_team"`
+		} `json:"certificates"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(req.Certificates) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one certificate is required")
+		return
+	}
+	if len(req.Certificates) > maxBulkItems {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("at most %d certificates per bulk request, got %d", maxBulkItems, len(req.Certificates)))
+		return
+	}
+
+	results := make([]bulkImportItemResult, 0, len(req.Certificates))
+	for _, item := range req.Certificates {
+		cert, version, err := certificate.ImportFromPEM(item.PEMCert, item.PEMChain, item.OwningTeam)
+		if err != nil {
+			results = append(results, bulkImportItemResult{Error: err.Error()})
+			continue
+		}
+		created, err := h.deps.Certs.Create(r.Context(), cert)
+		if err != nil {
+			results = append(results, bulkImportItemResult{CommonName: cert.CommonName, Error: "could not store certificate"})
+			continue
+		}
+		version.CertificateID = created.ID
+		if _, err := h.deps.Certs.AddVersion(r.Context(), version); err != nil {
+			results = append(results, bulkImportItemResult{CommonName: cert.CommonName, CertificateID: created.ID, Error: "could not store certificate version"})
+			continue
+		}
+		h.audit(r, "imported", "certificate", created.ID, string(auth.ScopeCertsIssue), map[string]interface{}{"bulk": true})
+		results = append(results, bulkImportItemResult{CommonName: cert.CommonName, CertificateID: created.ID, Success: true})
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+func (h *handlers) listK8sTargets(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	targets, err := h.deps.K8s.ListTargets(r.Context(), cert.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list Kubernetes sync targets")
+		return
+	}
+	writeJSON(w, http.StatusOK, targets)
+}
+
+func (h *handlers) createK8sTarget(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	var req k8s.TargetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	target, err := h.deps.K8s.CreateTarget(r.Context(), cert.ID, req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.audit(r, "k8s_target_created", "certificate", cert.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{
+		"target_id": target.ID, "cluster_url": req.ClusterURL, "namespace": req.Namespace, "secret_name": req.SecretName,
+	})
+	writeJSON(w, http.StatusCreated, target)
+}
+
+func (h *handlers) updateK8sTarget(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	var req k8s.TargetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	target, err := h.deps.K8s.UpdateTarget(r.Context(), r.PathValue("targetId"), req)
+	if err != nil {
+		if errors.Is(err, k8s.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "Kubernetes sync target not found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.audit(r, "k8s_target_updated", "certificate", cert.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{"target_id": target.ID})
+	writeJSON(w, http.StatusOK, target)
+}
+
+func (h *handlers) deleteK8sTarget(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	targetID := r.PathValue("targetId")
+	if err := h.deps.K8s.DeleteTarget(r.Context(), targetID); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not delete Kubernetes sync target")
+		return
+	}
+	h.audit(r, "k8s_target_deleted", "certificate", cert.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{"target_id": targetID})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (h *handlers) createOrder(w http.ResponseWriter, r *http.Request) {
@@ -327,6 +580,67 @@ func (h *handlers) cancelDiscoveryScan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "canceling"})
 }
 
+func (h *handlers) createDiscoverySchedule(w http.ResponseWriter, r *http.Request) {
+	identity, _ := auth.IdentityFromContext(r.Context())
+
+	var req discovery.ScheduleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	sch, err := h.deps.Discovery.CreateSchedule(r.Context(), req, identity.UserID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.audit(r, "discovery_schedule_created", "discovery_schedule", sch.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{
+		"targets": req.Targets, "interval_minutes": req.IntervalMinutes,
+	})
+	writeJSON(w, http.StatusCreated, sch)
+}
+
+func (h *handlers) listDiscoverySchedules(w http.ResponseWriter, r *http.Request) {
+	schedules, err := h.deps.Discovery.ListSchedules(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list schedules")
+		return
+	}
+	writeJSON(w, http.StatusOK, schedules)
+}
+
+func (h *handlers) updateDiscoverySchedule(w http.ResponseWriter, r *http.Request) {
+	var req discovery.ScheduleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	sch, err := h.deps.Discovery.UpdateSchedule(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		if errors.Is(err, discovery.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "schedule not found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.audit(r, "discovery_schedule_updated", "discovery_schedule", sch.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{
+		"interval_minutes": req.IntervalMinutes, "enabled": req.Enabled,
+	})
+	writeJSON(w, http.StatusOK, sch)
+}
+
+func (h *handlers) deleteDiscoverySchedule(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.deps.Discovery.DeleteSchedule(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not delete schedule")
+		return
+	}
+	h.audit(r, "discovery_schedule_deleted", "discovery_schedule", id, string(auth.ScopeCertsAdmin), nil)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 func (h *handlers) getNotificationSettings(w http.ResponseWriter, r *http.Request) {
 	settings, err := h.deps.NotificationSettings.Get(r.Context())
 	if err != nil {
@@ -423,10 +737,11 @@ func (h *handlers) updateCertificateNotifyEmails(w http.ResponseWriter, r *http.
 // gates the Discovery and Notifications pages themselves), so they're left
 // nil for a team-scoped viewer rather than leaking cross-team activity.
 type summaryReport struct {
-	Certificates           certificate.Stats  `json:"certificates"`
-	DiscoveryMismatches    []discovery.Result `json:"discovery_mismatches,omitempty"`
-	NotificationsSent30d   int                `json:"notifications_sent_30d,omitempty"`
-	NotificationsFailed30d int                `json:"notifications_failed_30d,omitempty"`
+	Certificates           certificate.Stats               `json:"certificates"`
+	DiscoveryMismatches    []discovery.Result              `json:"discovery_mismatches,omitempty"`
+	Vulnerabilities        *discovery.VulnerabilitySummary `json:"vulnerabilities,omitempty"`
+	NotificationsSent30d   int                             `json:"notifications_sent_30d,omitempty"`
+	NotificationsFailed30d int                             `json:"notifications_failed_30d,omitempty"`
 }
 
 func (h *handlers) getSummaryReport(w http.ResponseWriter, r *http.Request) {
@@ -447,6 +762,9 @@ func (h *handlers) getSummaryReport(w http.ResponseWriter, r *http.Request) {
 	if team == "" {
 		if mismatches, err := h.deps.Discovery.ListMismatches(r.Context(), 50); err == nil {
 			report.DiscoveryMismatches = mismatches
+		}
+		if vulns, err := h.deps.Discovery.VulnerabilitySummary(r.Context()); err == nil {
+			report.Vulnerabilities = &vulns
 		}
 		if sent, failed, err := h.deps.NotifyLog.Stats(r.Context(), time.Now().Add(-30*24*time.Hour)); err == nil {
 			report.NotificationsSent30d = sent

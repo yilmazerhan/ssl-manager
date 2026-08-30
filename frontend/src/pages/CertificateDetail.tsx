@@ -6,6 +6,7 @@ import {
   Certificate,
   CertificatePosture,
   CertificateVersion,
+  K8sTarget,
   NotificationLogEntry,
   downloadPEM,
 } from "../api/client";
@@ -29,6 +30,26 @@ export default function CertificateDetail() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const [k8sTargets, setK8sTargets] = useState<K8sTarget[]>([]);
+  const [k8sError, setK8sError] = useState<string | null>(null);
+  const [showK8sForm, setShowK8sForm] = useState(false);
+  const [editingTargetID, setEditingTargetID] = useState<string | null>(null);
+  const [k8sName, setK8sName] = useState("");
+  const [k8sClusterURL, setK8sClusterURL] = useState("");
+  const [k8sToken, setK8sToken] = useState("");
+  const [k8sNamespace, setK8sNamespace] = useState("");
+  const [k8sSecretName, setK8sSecretName] = useState("");
+  const [k8sInsecureSkipVerify, setK8sInsecureSkipVerify] = useState(false);
+  const [k8sBusy, setK8sBusy] = useState(false);
+
+  function refreshK8sTargets() {
+    if (!id) return;
+    api
+      .listK8sTargets(id)
+      .then((t) => setK8sTargets(t ?? []))
+      .catch((e) => setK8sError(e.message));
+  }
 
   function load() {
     if (!id) return;
@@ -55,6 +76,68 @@ export default function CertificateDetail() {
       .catch((e) => setPostureError(e.message))
       .finally(() => setPostureLoading(false));
   }, [id]);
+
+  useEffect(refreshK8sTargets, [id]);
+
+  function resetK8sForm() {
+    setEditingTargetID(null);
+    setK8sName("");
+    setK8sClusterURL("");
+    setK8sToken("");
+    setK8sNamespace("");
+    setK8sSecretName("");
+    setK8sInsecureSkipVerify(false);
+    setShowK8sForm(false);
+  }
+
+  function editK8sTarget(t: K8sTarget) {
+    setEditingTargetID(t.id);
+    setK8sName(t.name);
+    setK8sClusterURL(t.cluster_url);
+    setK8sToken("");
+    setK8sNamespace(t.namespace);
+    setK8sSecretName(t.secret_name);
+    setK8sInsecureSkipVerify(t.insecure_skip_verify);
+    setShowK8sForm(true);
+  }
+
+  async function submitK8sTarget() {
+    if (!id) return;
+    setK8sError(null);
+    setK8sBusy(true);
+    try {
+      const req = {
+        name: k8sName,
+        cluster_url: k8sClusterURL,
+        token: k8sToken || undefined,
+        namespace: k8sNamespace,
+        secret_name: k8sSecretName,
+        insecure_skip_verify: k8sInsecureSkipVerify,
+        enabled: true,
+      };
+      if (editingTargetID) {
+        await api.updateK8sTarget(id, editingTargetID, req);
+      } else {
+        await api.createK8sTarget(id, req);
+      }
+      resetK8sForm();
+      refreshK8sTargets();
+    } catch (e) {
+      setK8sError((e as Error).message);
+    } finally {
+      setK8sBusy(false);
+    }
+  }
+
+  async function deleteK8sTarget(targetId: string) {
+    if (!id) return;
+    try {
+      await api.deleteK8sTarget(id, targetId);
+      refreshK8sTargets();
+    } catch (e) {
+      setK8sError((e as Error).message);
+    }
+  }
 
   async function handleSaveNotifyEmails() {
     if (!id) return;
@@ -145,7 +228,8 @@ export default function CertificateDetail() {
           {new Date(cert.not_after).toLocaleDateString()}
         </p>
         <p>
-          <strong>Key algorithm:</strong> {cert.key_algorithm} (held in Vault — never exportable)
+          <strong>Key algorithm:</strong> {cert.key_algorithm} (held in Vault —{" "}
+          {cert.key_exportable ? "exportable, for Kubernetes sync only" : "never exportable"})
         </p>
         <p>
           <strong>Validation method:</strong> {cert.validation_method}
@@ -245,6 +329,120 @@ export default function CertificateDetail() {
               </>
             )}
             <p style={{ fontSize: 12, color: "var(--muted)" }}>Probed {new Date(posture.probed_at).toLocaleString()}</p>
+          </>
+        )}
+      </div>
+
+      <h3>Kubernetes sync targets</h3>
+      <div className="card">
+        {!cert.key_exportable ? (
+          <p style={{ fontSize: 13, color: "var(--muted)" }}>
+            This certificate's key isn't exportable, so it can't be synced to a Kubernetes Secret — a Secret needs the raw private key,
+            and this platform's Vault key was created non-exportable (the default). Re-issue this certificate with "Sync to Kubernetes"
+            checked to enable this.
+          </p>
+        ) : (
+          <>
+            {k8sError && <p style={{ color: "var(--danger, #c0392b)" }}>{k8sError}</p>}
+            {hasScope("certs:admin") && !showK8sForm && (
+              <button className="secondary" onClick={() => setShowK8sForm(true)} style={{ marginBottom: 12 }}>
+                Add target
+              </button>
+            )}
+            {showK8sForm && (
+              <div style={{ marginBottom: 16 }}>
+                <div className="field">
+                  <label>Name</label>
+                  <input value={k8sName} onChange={(e) => setK8sName(e.target.value)} placeholder="prod-cluster" />
+                </div>
+                <div className="field">
+                  <label>Cluster API URL</label>
+                  <input value={k8sClusterURL} onChange={(e) => setK8sClusterURL(e.target.value)} placeholder="https://10.0.0.1:6443" />
+                </div>
+                <div className="field">
+                  <label>Bearer token{editingTargetID ? " (leave blank to keep the current one)" : ""}</label>
+                  <input type="password" value={k8sToken} onChange={(e) => setK8sToken(e.target.value)} />
+                </div>
+                <div style={{ display: "flex", gap: 16 }}>
+                  <div className="field" style={{ flex: 1 }}>
+                    <label>Namespace</label>
+                    <input value={k8sNamespace} onChange={(e) => setK8sNamespace(e.target.value)} placeholder="default" />
+                  </div>
+                  <div className="field" style={{ flex: 1 }}>
+                    <label>Secret name</label>
+                    <input value={k8sSecretName} onChange={(e) => setK8sSecretName(e.target.value)} placeholder="app-tls" />
+                  </div>
+                </div>
+                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 12 }}>
+                  <input type="checkbox" checked={k8sInsecureSkipVerify} onChange={(e) => setK8sInsecureSkipVerify(e.target.checked)} />
+                  Skip TLS verification when connecting to this cluster's API server
+                </label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    className="primary"
+                    disabled={!k8sName || !k8sClusterURL || !k8sNamespace || !k8sSecretName || (!editingTargetID && !k8sToken) || k8sBusy}
+                    onClick={submitK8sTarget}
+                  >
+                    {k8sBusy ? "Saving…" : editingTargetID ? "Save changes" : "Add target"}
+                  </button>
+                  <button className="secondary" onClick={resetK8sForm}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Namespace / Secret</th>
+                  <th>Status</th>
+                  <th>Last synced</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {k8sTargets.map((t) => (
+                  <tr key={t.id}>
+                    <td>{t.name}</td>
+                    <td>
+                      {t.namespace}/{t.secret_name}
+                    </td>
+                    <td>
+                      {!t.enabled ? (
+                        <span className="pill warn">paused</span>
+                      ) : t.last_sync_error ? (
+                        <span className="pill critical" title={t.last_sync_error}>
+                          error
+                        </span>
+                      ) : t.last_synced_at ? (
+                        <span className="pill ok">synced</span>
+                      ) : (
+                        <span className="pill accent">pending</span>
+                      )}
+                    </td>
+                    <td>{t.last_synced_at ? new Date(t.last_synced_at).toLocaleString() : "never"}</td>
+                    <td style={{ display: "flex", gap: 6 }}>
+                      {hasScope("certs:admin") && (
+                        <>
+                          <button className="secondary" onClick={() => editK8sTarget(t)}>
+                            Edit
+                          </button>
+                          <button className="secondary" onClick={() => deleteK8sTarget(t.id)}>
+                            Delete
+                          </button>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {k8sTargets.length === 0 && (
+                  <tr>
+                    <td colSpan={5}>No Kubernetes sync targets yet.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </>
         )}
       </div>

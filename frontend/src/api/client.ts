@@ -8,6 +8,7 @@ export interface Certificate {
   not_before: string;
   not_after: string;
   key_algorithm: string;
+  key_exportable: boolean;
   owning_team: string;
   auto_renew: boolean;
   renew_before_days: number;
@@ -85,6 +86,35 @@ export interface CreateOrderRequest {
   country?: string;
   state?: string;
   locality?: string;
+  // exportable_key is a one-time, irreversible choice at issuance — see
+  // certificate.Certificate.KeyExportable. Only a certificate created with
+  // this set can later get a Kubernetes sync target.
+  exportable_key?: boolean;
+}
+
+export interface K8sTarget {
+  id: string;
+  certificate_id: string;
+  name: string;
+  cluster_url: string;
+  namespace: string;
+  secret_name: string;
+  insecure_skip_verify: boolean;
+  enabled: boolean;
+  last_synced_at?: string;
+  last_sync_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface K8sTargetRequest {
+  name: string;
+  cluster_url: string;
+  token?: string;
+  namespace: string;
+  secret_name: string;
+  insecure_skip_verify?: boolean;
+  enabled: boolean;
 }
 
 export interface AuditEntry {
@@ -177,6 +207,9 @@ export interface DiscoveryResult {
   issuer?: string;
   serial_number?: string;
   fingerprint_sha256?: string;
+  signature_algorithm?: string;
+  cipher_suite?: string;
+  vulnerabilities?: string[];
   not_before?: string;
   not_after?: string;
   match_status: "matched" | "mismatched" | "not_in_inventory" | "no_tls" | "unreachable";
@@ -194,6 +227,61 @@ export interface CreateScanRequest {
   concurrency?: number;
 }
 
+export interface DiscoverySchedule {
+  id: string;
+  name: string;
+  description: string;
+  targets: string[];
+  ports: number[];
+  timeout_ms: number;
+  concurrency: number;
+  interval_minutes: number;
+  enabled: boolean;
+  created_by: string;
+  last_run_at?: string;
+  last_scan_id?: string;
+  next_run_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScheduleRequest {
+  name: string;
+  description?: string;
+  targets: string[];
+  ports?: number[];
+  timeout_ms?: number;
+  concurrency?: number;
+  interval_minutes: number;
+  enabled: boolean;
+}
+
+export interface BulkImportItem {
+  pem_cert: string;
+  pem_chain?: string;
+  owning_team: string;
+}
+
+export interface BulkImportItemResult {
+  common_name?: string;
+  certificate_id?: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface BulkItemResult {
+  id?: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface VulnerabilitySummary {
+  total_endpoints: number;
+  weak_tls_version: number;
+  weak_signature_algorithm: number;
+  expired_certificate: number;
+}
+
 export interface Stats {
   total: number;
   by_status: Record<string, number>;
@@ -206,6 +294,7 @@ export interface Stats {
 export interface SummaryReport {
   certificates: Stats;
   discovery_mismatches?: DiscoveryResult[];
+  vulnerabilities?: VulnerabilitySummary;
   notifications_sent_30d?: number;
   notifications_failed_30d?: number;
 }
@@ -275,8 +364,21 @@ export const api = {
   getHistory: (id: string) => request<CertificateVersion[]>(`/certificates/${id}/history`),
   getAudit: (id: string) => request<AuditEntry[]>(`/certificates/${id}/audit`),
   getCertificatePosture: (id: string) => request<CertificatePosture>(`/certificates/${id}/posture`),
+  listK8sTargets: (certificateId: string) => request<K8sTarget[]>(`/certificates/${certificateId}/k8s-targets`),
+  createK8sTarget: (certificateId: string, body: K8sTargetRequest) =>
+    request<K8sTarget>(`/certificates/${certificateId}/k8s-targets`, { method: "POST", body: JSON.stringify(body) }),
+  updateK8sTarget: (certificateId: string, targetId: string, body: K8sTargetRequest) =>
+    request<K8sTarget>(`/certificates/${certificateId}/k8s-targets/${targetId}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteK8sTarget: (certificateId: string, targetId: string) =>
+    request<{ status: string }>(`/certificates/${certificateId}/k8s-targets/${targetId}`, { method: "DELETE" }),
   renewCertificate: (id: string) => request<CertificateOrder>(`/certificates/${id}/renew`, { method: "POST" }),
   revokeCertificate: (id: string) => request<{ status: string }>(`/certificates/${id}/revoke`, { method: "POST" }),
+  bulkImportCertificates: (certificates: BulkImportItem[]) =>
+    request<BulkImportItemResult[]>("/certificates/bulk-import", { method: "POST", body: JSON.stringify({ certificates }) }),
+  bulkRevokeCertificates: (certificateIds: string[]) =>
+    request<BulkItemResult[]>("/certificates/bulk-revoke", { method: "POST", body: JSON.stringify({ certificate_ids: certificateIds }) }),
+  bulkRenewCertificates: (certificateIds: string[]) =>
+    request<BulkItemResult[]>("/certificates/bulk-renew", { method: "POST", body: JSON.stringify({ certificate_ids: certificateIds }) }),
 
   issueDownloadToken: (id: string) =>
     request<{ token: string; expires_at: string }>(`/certificates/${id}/download-token`, { method: "POST" }),
@@ -312,6 +414,10 @@ export const api = {
   getScan: (id: string) => request<DiscoveryScan>(`/discovery/scans/${id}`),
   listScanResults: (id: string) => request<DiscoveryResult[]>(`/discovery/scans/${id}/results`),
   cancelScan: (id: string) => request<{ status: string }>(`/discovery/scans/${id}/cancel`, { method: "POST" }),
+  createSchedule: (body: ScheduleRequest) => request<DiscoverySchedule>("/discovery/schedules", { method: "POST", body: JSON.stringify(body) }),
+  listSchedules: () => request<DiscoverySchedule[]>("/discovery/schedules"),
+  updateSchedule: (id: string, body: ScheduleRequest) => request<DiscoverySchedule>(`/discovery/schedules/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteSchedule: (id: string) => request<{ status: string }>(`/discovery/schedules/${id}`, { method: "DELETE" }),
 
   getNotificationSettings: () => request<ReminderSettings>("/notification-settings"),
   updateNotificationSettings: (s: ReminderSettings) =>

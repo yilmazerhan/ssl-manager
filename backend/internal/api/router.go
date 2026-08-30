@@ -15,6 +15,7 @@ import (
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/discovery"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/downloadtoken"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/k8s"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/order"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/renewal"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/secrets"
@@ -34,6 +35,7 @@ type Dependencies struct {
 	DevAuthEnabled       bool
 	Authorities          *ca.Registry
 	Discovery            *discovery.Service
+	K8s                  *k8s.Service
 	NotificationSettings renewal.SettingsStore
 	NotifyLog            renewal.NotifyLogStore
 
@@ -131,6 +133,15 @@ func NewRouter(deps Dependencies) http.Handler {
 	mux.Handle("POST /api/v1/certificates/{id}/renew", authed(auth.RequireScope(auth.ScopeCertsIssue)(http.HandlerFunc(h.renewCertificate))))
 	mux.Handle("POST /api/v1/certificates/{id}/revoke", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.revokeCertificate))))
 
+	mux.Handle("POST /api/v1/certificates/bulk-import", authed(auth.RequireScope(auth.ScopeCertsIssue)(http.HandlerFunc(h.bulkImportCertificates))))
+	mux.Handle("POST /api/v1/certificates/bulk-renew", authed(auth.RequireScope(auth.ScopeCertsIssue)(http.HandlerFunc(h.bulkRenewCertificates))))
+	mux.Handle("POST /api/v1/certificates/bulk-revoke", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.bulkRevokeCertificates))))
+
+	mux.Handle("GET /api/v1/certificates/{id}/k8s-targets", authed(auth.RequireScope(auth.ScopeCertsRead)(http.HandlerFunc(h.listK8sTargets))))
+	mux.Handle("POST /api/v1/certificates/{id}/k8s-targets", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.createK8sTarget))))
+	mux.Handle("PUT /api/v1/certificates/{id}/k8s-targets/{targetId}", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.updateK8sTarget))))
+	mux.Handle("DELETE /api/v1/certificates/{id}/k8s-targets/{targetId}", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.deleteK8sTarget))))
+
 	mux.Handle("POST /api/v1/certificate-orders", authed(auth.RequireScope(auth.ScopeCertsIssue)(http.HandlerFunc(h.createOrder))))
 	mux.Handle("GET /api/v1/certificate-orders/{id}", authed(auth.RequireScope(auth.ScopeCertsRead)(http.HandlerFunc(h.getOrder))))
 	mux.Handle("POST /api/v1/certificate-orders/{id}/validate", authed(auth.RequireScope(auth.ScopeCertsIssue)(http.HandlerFunc(h.validateOrder))))
@@ -147,6 +158,11 @@ func NewRouter(deps Dependencies) http.Handler {
 	mux.Handle("GET /api/v1/discovery/scans/{id}", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.getDiscoveryScan))))
 	mux.Handle("GET /api/v1/discovery/scans/{id}/results", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.listDiscoveryResults))))
 	mux.Handle("POST /api/v1/discovery/scans/{id}/cancel", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.cancelDiscoveryScan))))
+
+	mux.Handle("POST /api/v1/discovery/schedules", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.createDiscoverySchedule))))
+	mux.Handle("GET /api/v1/discovery/schedules", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.listDiscoverySchedules))))
+	mux.Handle("PUT /api/v1/discovery/schedules/{id}", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.updateDiscoverySchedule))))
+	mux.Handle("DELETE /api/v1/discovery/schedules/{id}", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.deleteDiscoverySchedule))))
 
 	mux.Handle("GET /api/v1/notification-settings", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.getNotificationSettings))))
 	mux.Handle("PUT /api/v1/notification-settings", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.updateNotificationSettings))))
@@ -166,7 +182,7 @@ func NewRouter(deps Dependencies) http.Handler {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

@@ -1,14 +1,18 @@
 // Package discovery implements the network keşif (discovery) module: scan
 // a bounded set of hosts/CIDRs/ports for live TLS endpoints, record what
 // certificate each one presents, and reconcile that against the
-// certificate inventory (matched / mismatched / not tracked at all).
+// certificate inventory (matched / mismatched / not tracked at all). A
+// scan can be one-off (CreateScan) or recurring (a Schedule, fired by
+// Service.Run through the same CreateScan code path).
 //
 // This is deliberately narrow: a TLS handshake and nothing else. It never
-// sends an HTTP request, never probes for vulnerabilities, and never
-// touches a port that doesn't answer TLS — it exists to find endpoints
-// inventory doesn't know about, not to assess them. Every scan is
-// admin-scoped and bounded (internal/discovery/scanner.go's limits) so it
-// can't be pointed at an unbounded range or used as a DoS tool.
+// sends an HTTP request and never touches a port that doesn't answer TLS.
+// It does classify what the handshake itself reveals — protocol version,
+// signature algorithm, expiry (see classifyVulnerabilities in scanner.go)
+// — since that's already observed for free, but it never actively probes
+// for anything beyond that one handshake. Every scan is admin-scoped and
+// bounded (internal/discovery/scanner.go's limits) so it can't be pointed
+// at an unbounded range or used as a DoS tool.
 package discovery
 
 import "time"
@@ -68,23 +72,30 @@ type Scan struct {
 }
 
 type Result struct {
-	ID                string      `json:"id"`
-	ScanID            string      `json:"scan_id"`
-	Host              string      `json:"host"`
-	Port              int         `json:"port"`
-	Reachable         bool        `json:"reachable"`
-	TLSVersion        string      `json:"tls_version,omitempty"`
-	CommonName        string      `json:"common_name,omitempty"`
-	SANs              []string    `json:"sans,omitempty"`
-	Issuer            string      `json:"issuer,omitempty"`
-	SerialNumber      string      `json:"serial_number,omitempty"`
-	FingerprintSHA256 string      `json:"fingerprint_sha256,omitempty"`
-	NotBefore         *time.Time  `json:"not_before,omitempty"`
-	NotAfter          *time.Time  `json:"not_after,omitempty"`
-	MatchStatus       MatchStatus `json:"match_status"`
-	MatchedCertID     string      `json:"matched_certificate_id,omitempty"`
-	Error             string      `json:"error,omitempty"`
-	DiscoveredAt      time.Time   `json:"discovered_at"`
+	ID                 string   `json:"id"`
+	ScanID             string   `json:"scan_id"`
+	Host               string   `json:"host"`
+	Port               int      `json:"port"`
+	Reachable          bool     `json:"reachable"`
+	TLSVersion         string   `json:"tls_version,omitempty"`
+	CommonName         string   `json:"common_name,omitempty"`
+	SANs               []string `json:"sans,omitempty"`
+	Issuer             string   `json:"issuer,omitempty"`
+	SerialNumber       string   `json:"serial_number,omitempty"`
+	FingerprintSHA256  string   `json:"fingerprint_sha256,omitempty"`
+	SignatureAlgorithm string   `json:"signature_algorithm,omitempty"`
+	CipherSuite        string   `json:"cipher_suite,omitempty"`
+	// Vulnerabilities is computed once, at probe time, by
+	// classifyVulnerabilities — see scanner.go. Never re-derived at read
+	// time, so the fleet-wide summary (store.go's VulnerabilitySummary) is a
+	// plain aggregate over stored rows, not a re-scan.
+	Vulnerabilities []string    `json:"vulnerabilities,omitempty"`
+	NotBefore       *time.Time  `json:"not_before,omitempty"`
+	NotAfter        *time.Time  `json:"not_after,omitempty"`
+	MatchStatus     MatchStatus `json:"match_status"`
+	MatchedCertID   string      `json:"matched_certificate_id,omitempty"`
+	Error           string      `json:"error,omitempty"`
+	DiscoveredAt    time.Time   `json:"discovered_at"`
 }
 
 type CreateScanRequest struct {
@@ -94,4 +105,47 @@ type CreateScanRequest struct {
 	Ports       []int    `json:"ports"`
 	TimeoutMS   int      `json:"timeout_ms"`
 	Concurrency int      `json:"concurrency"`
+}
+
+// Schedule is a recurring template: Service.Run fires a real Scan through
+// it every IntervalMinutes, via the same CreateScan validation and code
+// path a one-off scan uses.
+type Schedule struct {
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	Description     string     `json:"description"`
+	Targets         []string   `json:"targets"`
+	Ports           []int      `json:"ports"`
+	TimeoutMS       int        `json:"timeout_ms"`
+	Concurrency     int        `json:"concurrency"`
+	IntervalMinutes int        `json:"interval_minutes"`
+	Enabled         bool       `json:"enabled"`
+	CreatedBy       string     `json:"created_by"`
+	LastRunAt       *time.Time `json:"last_run_at,omitempty"`
+	LastScanID      string     `json:"last_scan_id,omitempty"`
+	NextRunAt       time.Time  `json:"next_run_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type ScheduleRequest struct {
+	Name            string   `json:"name"`
+	Description     string   `json:"description"`
+	Targets         []string `json:"targets"`
+	Ports           []int    `json:"ports"`
+	TimeoutMS       int      `json:"timeout_ms"`
+	Concurrency     int      `json:"concurrency"`
+	IntervalMinutes int      `json:"interval_minutes"`
+	Enabled         bool     `json:"enabled"`
+}
+
+// VulnerabilitySummary is the fleet-wide posture dashboard's shape: counts
+// over the most recent result per host:port, not every historical scan, so
+// a host that's been rescanned many times (especially once schedules exist)
+// is counted once at its latest state.
+type VulnerabilitySummary struct {
+	TotalEndpoints         int `json:"total_endpoints"`
+	WeakTLSVersion         int `json:"weak_tls_version"`
+	WeakSignatureAlgorithm int `json:"weak_signature_algorithm"`
+	ExpiredCertificate     int `json:"expired_certificate"`
 }

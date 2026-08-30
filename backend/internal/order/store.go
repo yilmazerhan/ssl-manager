@@ -36,7 +36,7 @@ const orderColumns = `
 	key_algorithm, status, challenge_details, coalesce(key_ref, ''), coalesce(csr, ''),
 	coalesce(certificate_id::text, ''), coalesce(error, ''), attempt_count, created_at, completed_at,
 	coalesce(organization, ''), coalesce(organizational_unit, ''), coalesce(country, ''),
-	coalesce(state, ''), coalesce(locality, '')
+	coalesce(state, ''), coalesce(locality, ''), key_exportable
 `
 
 func (s *PostgresStore) Create(ctx context.Context, o Order) (Order, error) {
@@ -49,12 +49,12 @@ func (s *PostgresStore) Create(ctx context.Context, o Order) (Order, error) {
 		INSERT INTO certificate_order
 			(requested_by, owning_team, domains, ca_provider, validation_method,
 			 key_algorithm, status, challenge_details, key_ref, csr, certificate_id,
-			 organization, organizational_unit, country, state, locality)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			 organization, organizational_unit, country, state, locality, key_exportable)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		RETURNING `+orderColumns, o.RequestedBy, o.OwningTeam, o.Domains, o.CAProvider, o.ValidationMethod,
 		o.KeyAlgorithm, o.Status, challengeJSON, nullableString(o.KeyRef), nullableString(o.CSRPEM), nullableUUID(o.CertificateID),
 		nullableString(o.Organization), nullableString(o.OrganizationalUnit), nullableString(o.Country),
-		nullableString(o.State), nullableString(o.Locality))
+		nullableString(o.State), nullableString(o.Locality), o.KeyExportable)
 	return scanOrder(row)
 }
 
@@ -107,7 +107,7 @@ func scanOrder(row rowScanner) (Order, error) {
 
 	err := row.Scan(&o.ID, &o.RequestedBy, &o.OwningTeam, &o.Domains, &o.CAProvider, &o.ValidationMethod,
 		&o.KeyAlgorithm, &o.Status, &challengeJSON, &o.KeyRef, &o.CSRPEM, &o.CertificateID, &o.Error, &o.AttemptCount,
-		&o.CreatedAt, &completedAt, &o.Organization, &o.OrganizationalUnit, &o.Country, &o.State, &o.Locality)
+		&o.CreatedAt, &completedAt, &o.Organization, &o.OrganizationalUnit, &o.Country, &o.State, &o.Locality, &o.KeyExportable)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Order{}, ErrNotFound

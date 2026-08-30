@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,6 +27,14 @@ const (
 	MinTimeoutMS       = 200
 	MaxTimeoutMS       = 30000
 	DefaultTimeoutMS   = 3000
+
+	// MinIntervalMinutes/MaxIntervalMinutes bound how often a Schedule can
+	// re-fire — same spirit as the scan-shape bounds above: a schedule is
+	// still a scan, and shouldn't be usable to hammer a network faster than
+	// a human would ever legitimately want, or left to silently never run
+	// again.
+	MinIntervalMinutes = 5
+	MaxIntervalMinutes = 30 * 24 * 60
 )
 
 // expandTargets turns a mixed list of hostnames, bare IPs, and CIDR blocks
@@ -122,19 +131,21 @@ func incIP(ip net.IP) {
 // ignorant of the certificate store so it's trivially testable on its
 // own).
 type probeResult struct {
-	Host              string
-	Port              int
-	Reachable         bool
-	TLSVersion        string
-	CommonName        string
-	SANs              []string
-	Issuer            string
-	SerialNumber      string
-	FingerprintSHA256 string
-	NotBefore         *time.Time
-	NotAfter          *time.Time
-	NoTLS             bool
-	Error             string
+	Host               string
+	Port               int
+	Reachable          bool
+	TLSVersion         string
+	CommonName         string
+	SANs               []string
+	Issuer             string
+	SerialNumber       string
+	FingerprintSHA256  string
+	SignatureAlgorithm string
+	CipherSuite        string
+	NotBefore          *time.Time
+	NotAfter           *time.Time
+	NoTLS              bool
+	Error              string
 }
 
 // probe dials host:port and, if a TLS handshake completes, records the
@@ -171,6 +182,7 @@ func probe(ctx context.Context, host string, port int, timeout time.Duration) pr
 
 	state := tlsConn.ConnectionState()
 	result.TLSVersion = tlsVersionName(state.Version)
+	result.CipherSuite = tls.CipherSuiteName(state.CipherSuite)
 	if len(state.PeerCertificates) == 0 {
 		result.NoTLS = true
 		result.Error = "TLS handshake completed but no certificate was presented"
@@ -182,12 +194,41 @@ func probe(ctx context.Context, host string, port int, timeout time.Duration) pr
 	result.SANs = leaf.DNSNames
 	result.Issuer = leaf.Issuer.CommonName
 	result.SerialNumber = leaf.SerialNumber.String()
+	result.SignatureAlgorithm = leaf.SignatureAlgorithm.String()
 	sum := sha256.Sum256(leaf.Raw)
 	result.FingerprintSHA256 = hex.EncodeToString(sum[:])
 	notBefore, notAfter := leaf.NotBefore, leaf.NotAfter
 	result.NotBefore = &notBefore
 	result.NotAfter = &notAfter
 	return result
+}
+
+// weakTLSVersions/weakSignatureAlgorithms name what classifyVulnerabilities
+// flags — deprecated protocol versions still being served, and signature
+// algorithms no major CA has issued under in years but an old certificate
+// might still carry.
+var weakTLSVersions = map[string]bool{"TLS 1.0": true, "TLS 1.1": true}
+
+func isWeakSignatureAlgorithm(alg string) bool {
+	upper := strings.ToUpper(alg)
+	return strings.Contains(upper, "SHA1") || strings.Contains(upper, "MD5") || strings.Contains(upper, "MD2")
+}
+
+// classifyVulnerabilities runs once per probe (see reconcile) so the
+// fleet-wide dashboard is a plain read of what's already stored, never a
+// live re-scan.
+func classifyVulnerabilities(pr probeResult) []string {
+	var out []string
+	if weakTLSVersions[pr.TLSVersion] {
+		out = append(out, "weak_tls_version")
+	}
+	if isWeakSignatureAlgorithm(pr.SignatureAlgorithm) {
+		out = append(out, "weak_signature_algorithm")
+	}
+	if pr.NotAfter != nil && pr.NotAfter.Before(time.Now()) {
+		out = append(out, "expired_certificate")
+	}
+	return out
 }
 
 func tlsVersionName(v uint16) string {

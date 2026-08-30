@@ -1,6 +1,28 @@
 import { useEffect, useState } from "react";
-import { api, DiscoveryResult, DiscoveryScan } from "../api/client";
+import { api, DiscoveryResult, DiscoverySchedule, DiscoveryScan, ScheduleRequest } from "../api/client";
 import StatusPill from "../components/StatusPill";
+
+const INTERVAL_PRESETS = [
+  { label: "Every 15 minutes", minutes: 15 },
+  { label: "Every hour", minutes: 60 },
+  { label: "Every 6 hours", minutes: 6 * 60 },
+  { label: "Daily", minutes: 24 * 60 },
+  { label: "Weekly", minutes: 7 * 24 * 60 },
+];
+
+function intervalLabel(minutes: number): string {
+  const preset = INTERVAL_PRESETS.find((p) => p.minutes === minutes);
+  if (preset) return preset.label;
+  if (minutes % (24 * 60) === 0) return `Every ${minutes / (24 * 60)} day(s)`;
+  if (minutes % 60 === 0) return `Every ${minutes / 60} hour(s)`;
+  return `Every ${minutes} minute(s)`;
+}
+
+const VULN_LABELS: Record<string, string> = {
+  weak_tls_version: "weak TLS version",
+  weak_signature_algorithm: "weak signature",
+  expired_certificate: "expired",
+};
 
 export default function Discovery() {
   const [scans, setScans] = useState<DiscoveryScan[]>([]);
@@ -14,6 +36,16 @@ export default function Discovery() {
   const [timeoutMs, setTimeoutMs] = useState(3000);
   const [submitting, setSubmitting] = useState(false);
 
+  const [schedules, setSchedules] = useState<DiscoverySchedule[]>([]);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [showScheduleForm, setShowScheduleForm] = useState(false);
+  const [editingScheduleID, setEditingScheduleID] = useState<string | null>(null);
+  const [schName, setSchName] = useState("");
+  const [schTargets, setSchTargets] = useState("");
+  const [schPorts, setSchPorts] = useState("443");
+  const [schIntervalMinutes, setSchIntervalMinutes] = useState(60);
+  const [schSubmitting, setSchSubmitting] = useState(false);
+
   function refreshScans() {
     api
       .listScans()
@@ -21,8 +53,16 @@ export default function Discovery() {
       .catch((e) => setError(e.message));
   }
 
+  function refreshSchedules() {
+    api
+      .listSchedules()
+      .then((s) => setSchedules(s ?? []))
+      .catch((e) => setScheduleError(e.message));
+  }
+
   useEffect(() => {
     refreshScans();
+    refreshSchedules();
   }, []);
 
   // While any scan is still running, poll — a scan can take a while and
@@ -87,13 +127,185 @@ export default function Discovery() {
     }
   }
 
+  function resetScheduleForm() {
+    setEditingScheduleID(null);
+    setSchName("");
+    setSchTargets("");
+    setSchPorts("443");
+    setSchIntervalMinutes(60);
+    setShowScheduleForm(false);
+  }
+
+  function editSchedule(s: DiscoverySchedule) {
+    setEditingScheduleID(s.id);
+    setSchName(s.name);
+    setSchTargets(s.targets.join(", "));
+    setSchPorts(s.ports.join(", "));
+    setSchIntervalMinutes(s.interval_minutes);
+    setShowScheduleForm(true);
+  }
+
+  function scheduleRequestFromForm(enabled: boolean): ScheduleRequest {
+    return {
+      name: schName,
+      targets: schTargets
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean),
+      ports: schPorts
+        .split(",")
+        .map((p) => Number(p.trim()))
+        .filter((p) => !Number.isNaN(p) && p > 0),
+      interval_minutes: schIntervalMinutes,
+      enabled,
+    };
+  }
+
+  async function submitSchedule() {
+    setScheduleError(null);
+    setSchSubmitting(true);
+    try {
+      const req = scheduleRequestFromForm(true);
+      if (editingScheduleID) {
+        await api.updateSchedule(editingScheduleID, req);
+      } else {
+        await api.createSchedule(req);
+      }
+      resetScheduleForm();
+      refreshSchedules();
+    } catch (e) {
+      setScheduleError((e as Error).message);
+    } finally {
+      setSchSubmitting(false);
+    }
+  }
+
+  async function toggleSchedule(s: DiscoverySchedule) {
+    try {
+      await api.updateSchedule(s.id, {
+        name: s.name,
+        targets: s.targets,
+        ports: s.ports,
+        timeout_ms: s.timeout_ms,
+        concurrency: s.concurrency,
+        interval_minutes: s.interval_minutes,
+        enabled: !s.enabled,
+      });
+      refreshSchedules();
+    } catch (e) {
+      setScheduleError((e as Error).message);
+    }
+  }
+
+  async function deleteSchedule(id: string) {
+    try {
+      await api.deleteSchedule(id);
+      refreshSchedules();
+    } catch (e) {
+      setScheduleError((e as Error).message);
+    }
+  }
+
   return (
     <>
       <h1>Network discovery</h1>
       <p className="page-lede">
         Probe a bounded set of hosts/CIDRs and ports for live TLS endpoints, and reconcile what's actually being served against the inventory.
-        This only performs a TLS handshake — no vulnerability scanning, no HTTP requests.
+        Every probe also classifies what the handshake itself reveals — a weak signature algorithm, a deprecated TLS version, an expired
+        certificate — without making any HTTP request.
       </p>
+
+      {scheduleError && <div className="card">{scheduleError}</div>}
+
+      <div className="card">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <h3 style={{ margin: 0 }}>Scheduled scans</h3>
+          {!showScheduleForm && (
+            <button className="secondary" onClick={() => setShowScheduleForm(true)}>
+              New schedule
+            </button>
+          )}
+        </div>
+
+        {showScheduleForm && (
+          <div style={{ marginTop: 12 }}>
+            <div className="field">
+              <label>Name</label>
+              <input value={schName} onChange={(e) => setSchName(e.target.value)} placeholder="Weekly DMZ sweep" />
+            </div>
+            <div className="field">
+              <label>Targets (comma-separated hosts, IPs, or CIDRs)</label>
+              <input value={schTargets} onChange={(e) => setSchTargets(e.target.value)} placeholder="10.0.1.0/28, app.kron.com.tr" />
+            </div>
+            <div style={{ display: "flex", gap: 16 }}>
+              <div className="field" style={{ flex: 1 }}>
+                <label>Ports</label>
+                <input value={schPorts} onChange={(e) => setSchPorts(e.target.value)} placeholder="443, 8443" />
+              </div>
+              <div className="field" style={{ flex: 1 }}>
+                <label>Interval</label>
+                <select value={schIntervalMinutes} onChange={(e) => setSchIntervalMinutes(Number(e.target.value))}>
+                  {INTERVAL_PRESETS.map((p) => (
+                    <option key={p.minutes} value={p.minutes}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="primary" disabled={!schName || !schTargets || schSubmitting} onClick={submitSchedule}>
+                {schSubmitting ? "Saving…" : editingScheduleID ? "Save changes" : "Create schedule"}
+              </button>
+              <button className="secondary" onClick={resetScheduleForm}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        <table style={{ marginTop: showScheduleForm ? 20 : 12 }}>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Interval</th>
+              <th>Status</th>
+              <th>Last run</th>
+              <th>Next run</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {schedules.map((s) => (
+              <tr key={s.id}>
+                <td style={{ whiteSpace: "nowrap" }}>{s.name}</td>
+                <td style={{ whiteSpace: "nowrap" }}>{intervalLabel(s.interval_minutes)}</td>
+                <td>
+                  <span className={`pill ${s.enabled ? "ok" : "warn"}`}>{s.enabled ? "active" : "paused"}</span>
+                </td>
+                <td>{s.last_run_at ? new Date(s.last_run_at).toLocaleString() : "never"}</td>
+                <td>{s.enabled ? new Date(s.next_run_at).toLocaleString() : "—"}</td>
+                <td style={{ display: "flex", gap: 6 }}>
+                  <button className="secondary" onClick={() => toggleSchedule(s)}>
+                    {s.enabled ? "Pause" : "Resume"}
+                  </button>
+                  <button className="secondary" onClick={() => editSchedule(s)}>
+                    Edit
+                  </button>
+                  <button className="secondary" onClick={() => deleteSchedule(s.id)}>
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {schedules.length === 0 && (
+              <tr>
+                <td colSpan={6}>No scheduled scans yet.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       {error && <div className="card">{error}</div>}
 
@@ -122,6 +334,7 @@ export default function Discovery() {
         </button>
       </div>
 
+      <h3>Scan history</h3>
       <table>
         <thead>
           <tr>
@@ -189,6 +402,7 @@ export default function Discovery() {
                 <th>Issuer</th>
                 <th>Expires</th>
                 <th>TLS</th>
+                <th>Vulnerabilities</th>
               </tr>
             </thead>
             <tbody>
@@ -203,11 +417,24 @@ export default function Discovery() {
                   <td>{r.issuer ?? "—"}</td>
                   <td>{r.not_after ? new Date(r.not_after).toLocaleDateString() : "—"}</td>
                   <td>{r.tls_version ?? "—"}</td>
+                  <td>
+                    {!r.reachable || r.match_status === "no_tls" ? (
+                      "—"
+                    ) : r.vulnerabilities && r.vulnerabilities.length > 0 ? (
+                      r.vulnerabilities.map((v) => (
+                        <span key={v} className="pill critical" style={{ marginRight: 6 }}>
+                          {VULN_LABELS[v] ?? v}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="pill ok">clean</span>
+                    )}
+                  </td>
                 </tr>
               ))}
               {results.length === 0 && (
                 <tr>
-                  <td colSpan={7}>No results yet.</td>
+                  <td colSpan={8}>No results yet.</td>
                 </tr>
               )}
             </tbody>
