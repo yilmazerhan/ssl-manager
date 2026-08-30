@@ -271,12 +271,13 @@ export default function NewCertificateWizard() {
           </p>
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
             <input type="checkbox" checked={exportableKey} onChange={(e) => setExportableKey(e.target.checked)} />
-            Sync to Kubernetes as a Secret
+            Sync to Kubernetes, WinRM, or LDAPS
           </label>
           {exportableKey && (
             <p style={{ color: "var(--muted)", fontSize: 12, marginTop: 4 }}>
-              This makes an exception to the note above: this certificate's key can be exported to build a Kubernetes TLS Secret. This is a
-              one-time choice — it can't be turned on later without re-issuing the certificate.
+              This makes an exception to the note above: this certificate's key can be exported to build a Kubernetes Secret, or pushed to a
+              Windows host over WinRM to bind Secure WinRM or LDAPS to it. This is a one-time choice — it can't be turned on later without
+              re-issuing the certificate.
             </p>
           )}
           <button className="secondary" onClick={() => setStep("validation")} style={{ marginRight: 8 }}>

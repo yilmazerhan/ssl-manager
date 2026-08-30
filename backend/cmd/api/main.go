@@ -27,6 +27,7 @@ import (
 	"github.com/yilmazerhan/ssl-manager/backend/internal/renewal"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/secrets"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/user"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/winrm"
 )
 
 func main() {
@@ -186,11 +187,14 @@ func main() {
 	orderService := order.NewService(orders, certs, keyManager, authorities)
 
 	k8sService := k8s.NewService(k8s.NewPostgresStore(pool), certs, secretStore, keyManager)
+	winrmService := winrm.NewService(winrm.NewPostgresStore(pool), certs, secretStore, keyManager)
 	orderService.SetOnIssued(func(_ context.Context, certificateID string) {
-		// Runs detached from the issuance/renewal request's own context —
-		// an unreachable or slow cluster must never hold up or fail the
-		// request that triggered it (see k8s.Service.SyncCertificate).
+		// Both run detached from the issuance/renewal request's own
+		// context — an unreachable cluster/host must never hold up or
+		// fail the request that triggered it (see each Service's own
+		// SyncCertificate doc comment).
 		go k8sService.SyncCertificate(context.Background(), certificateID)
+		go winrmService.SyncCertificate(context.Background(), certificateID)
 	})
 
 	notifier := buildNotifier(cfg)
@@ -229,6 +233,7 @@ func main() {
 		Orders:                        orderService,
 		Renewal:                       renewalEngine,
 		K8s:                           k8sService,
+		WinRM:                         winrmService,
 		Users:                         users,
 		Sessions:                      sessions,
 		APIKeys:                       apiKeys,

@@ -20,6 +20,7 @@ import (
 	"github.com/yilmazerhan/ssl-manager/backend/internal/order"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/renewal"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/user"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/winrm"
 )
 
 type handlers struct {
@@ -459,6 +460,77 @@ func (h *handlers) deleteK8sTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, "k8s_target_deleted", "certificate", cert.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{"target_id": targetID})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *handlers) listWinRMTargets(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	targets, err := h.deps.WinRM.ListTargets(r.Context(), cert.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list WinRM sync targets")
+		return
+	}
+	writeJSON(w, http.StatusOK, targets)
+}
+
+func (h *handlers) createWinRMTarget(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	var req winrm.TargetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	target, err := h.deps.WinRM.CreateTarget(r.Context(), cert.ID, req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.audit(r, "winrm_target_created", "certificate", cert.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{
+		"target_id": target.ID, "host": req.Host, "port": req.Port, "service_type": string(req.ServiceType),
+	})
+	writeJSON(w, http.StatusCreated, target)
+}
+
+func (h *handlers) updateWinRMTarget(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	var req winrm.TargetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	target, err := h.deps.WinRM.UpdateTarget(r.Context(), r.PathValue("targetId"), req)
+	if err != nil {
+		if errors.Is(err, winrm.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "WinRM sync target not found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.audit(r, "winrm_target_updated", "certificate", cert.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{"target_id": target.ID})
+	writeJSON(w, http.StatusOK, target)
+}
+
+func (h *handlers) deleteWinRMTarget(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	targetID := r.PathValue("targetId")
+	if err := h.deps.WinRM.DeleteTarget(r.Context(), targetID); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not delete WinRM sync target")
+		return
+	}
+	h.audit(r, "winrm_target_deleted", "certificate", cert.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{"target_id": targetID})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 

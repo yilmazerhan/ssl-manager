@@ -117,6 +117,37 @@ export interface K8sTargetRequest {
   enabled: boolean;
 }
 
+export type WinRMServiceType = "winrm_https" | "ldaps";
+
+export interface WinRMTarget {
+  id: string;
+  certificate_id: string;
+  name: string;
+  host: string;
+  port: number;
+  use_https: boolean;
+  insecure_skip_verify: boolean;
+  username: string;
+  service_type: WinRMServiceType;
+  enabled: boolean;
+  last_synced_at?: string;
+  last_sync_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WinRMTargetRequest {
+  name: string;
+  host: string;
+  port: number;
+  use_https: boolean;
+  insecure_skip_verify?: boolean;
+  username: string;
+  password?: string;
+  service_type: WinRMServiceType;
+  enabled: boolean;
+}
+
 export interface AuditEntry {
   Actor: string;
   Action: string;
@@ -371,6 +402,13 @@ export const api = {
     request<K8sTarget>(`/certificates/${certificateId}/k8s-targets/${targetId}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteK8sTarget: (certificateId: string, targetId: string) =>
     request<{ status: string }>(`/certificates/${certificateId}/k8s-targets/${targetId}`, { method: "DELETE" }),
+  listWinRMTargets: (certificateId: string) => request<WinRMTarget[]>(`/certificates/${certificateId}/winrm-targets`),
+  createWinRMTarget: (certificateId: string, body: WinRMTargetRequest) =>
+    request<WinRMTarget>(`/certificates/${certificateId}/winrm-targets`, { method: "POST", body: JSON.stringify(body) }),
+  updateWinRMTarget: (certificateId: string, targetId: string, body: WinRMTargetRequest) =>
+    request<WinRMTarget>(`/certificates/${certificateId}/winrm-targets/${targetId}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteWinRMTarget: (certificateId: string, targetId: string) =>
+    request<{ status: string }>(`/certificates/${certificateId}/winrm-targets/${targetId}`, { method: "DELETE" }),
   renewCertificate: (id: string) => request<CertificateOrder>(`/certificates/${id}/renew`, { method: "POST" }),
   revokeCertificate: (id: string) => request<{ status: string }>(`/certificates/${id}/revoke`, { method: "POST" }),
   bulkImportCertificates: (certificates: BulkImportItem[]) =>

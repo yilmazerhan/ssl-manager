@@ -20,6 +20,7 @@ import (
 	"github.com/yilmazerhan/ssl-manager/backend/internal/renewal"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/secrets"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/user"
+	"github.com/yilmazerhan/ssl-manager/backend/internal/winrm"
 )
 
 type Dependencies struct {
@@ -36,6 +37,7 @@ type Dependencies struct {
 	Authorities          *ca.Registry
 	Discovery            *discovery.Service
 	K8s                  *k8s.Service
+	WinRM                *winrm.Service
 	NotificationSettings renewal.SettingsStore
 	NotifyLog            renewal.NotifyLogStore
 
@@ -141,6 +143,11 @@ func NewRouter(deps Dependencies) http.Handler {
 	mux.Handle("POST /api/v1/certificates/{id}/k8s-targets", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.createK8sTarget))))
 	mux.Handle("PUT /api/v1/certificates/{id}/k8s-targets/{targetId}", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.updateK8sTarget))))
 	mux.Handle("DELETE /api/v1/certificates/{id}/k8s-targets/{targetId}", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.deleteK8sTarget))))
+
+	mux.Handle("GET /api/v1/certificates/{id}/winrm-targets", authed(auth.RequireScope(auth.ScopeCertsRead)(http.HandlerFunc(h.listWinRMTargets))))
+	mux.Handle("POST /api/v1/certificates/{id}/winrm-targets", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.createWinRMTarget))))
+	mux.Handle("PUT /api/v1/certificates/{id}/winrm-targets/{targetId}", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.updateWinRMTarget))))
+	mux.Handle("DELETE /api/v1/certificates/{id}/winrm-targets/{targetId}", authed(auth.RequireScope(auth.ScopeCertsAdmin)(http.HandlerFunc(h.deleteWinRMTarget))))
 
 	mux.Handle("POST /api/v1/certificate-orders", authed(auth.RequireScope(auth.ScopeCertsIssue)(http.HandlerFunc(h.createOrder))))
 	mux.Handle("GET /api/v1/certificate-orders/{id}", authed(auth.RequireScope(auth.ScopeCertsRead)(http.HandlerFunc(h.getOrder))))

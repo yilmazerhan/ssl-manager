@@ -8,6 +8,8 @@ import {
   CertificateVersion,
   K8sTarget,
   NotificationLogEntry,
+  WinRMServiceType,
+  WinRMTarget,
   downloadPEM,
 } from "../api/client";
 import StatusPill from "../components/StatusPill";
@@ -139,6 +141,96 @@ export default function CertificateDetail() {
     }
   }
 
+  const [winrmTargets, setWinrmTargets] = useState<WinRMTarget[]>([]);
+  const [winrmError, setWinrmError] = useState<string | null>(null);
+  const [showWinrmForm, setShowWinrmForm] = useState(false);
+  const [editingWinrmTargetID, setEditingWinrmTargetID] = useState<string | null>(null);
+  const [winrmName, setWinrmName] = useState("");
+  const [winrmHost, setWinrmHost] = useState("");
+  const [winrmPort, setWinrmPort] = useState(5986);
+  const [winrmUseHTTPS, setWinrmUseHTTPS] = useState(true);
+  const [winrmUsername, setWinrmUsername] = useState("");
+  const [winrmPassword, setWinrmPassword] = useState("");
+  const [winrmServiceType, setWinrmServiceType] = useState<WinRMServiceType>("winrm_https");
+  const [winrmInsecureSkipVerify, setWinrmInsecureSkipVerify] = useState(false);
+  const [winrmBusy, setWinrmBusy] = useState(false);
+
+  function refreshWinrmTargets() {
+    if (!id) return;
+    api
+      .listWinRMTargets(id)
+      .then((t) => setWinrmTargets(t ?? []))
+      .catch((e) => setWinrmError(e.message));
+  }
+
+  useEffect(refreshWinrmTargets, [id]);
+
+  function resetWinrmForm() {
+    setEditingWinrmTargetID(null);
+    setWinrmName("");
+    setWinrmHost("");
+    setWinrmPort(5986);
+    setWinrmUseHTTPS(true);
+    setWinrmUsername("");
+    setWinrmPassword("");
+    setWinrmServiceType("winrm_https");
+    setWinrmInsecureSkipVerify(false);
+    setShowWinrmForm(false);
+  }
+
+  function editWinrmTarget(t: WinRMTarget) {
+    setEditingWinrmTargetID(t.id);
+    setWinrmName(t.name);
+    setWinrmHost(t.host);
+    setWinrmPort(t.port);
+    setWinrmUseHTTPS(t.use_https);
+    setWinrmUsername(t.username);
+    setWinrmPassword("");
+    setWinrmServiceType(t.service_type);
+    setWinrmInsecureSkipVerify(t.insecure_skip_verify);
+    setShowWinrmForm(true);
+  }
+
+  async function submitWinrmTarget() {
+    if (!id) return;
+    setWinrmError(null);
+    setWinrmBusy(true);
+    try {
+      const req = {
+        name: winrmName,
+        host: winrmHost,
+        port: winrmPort,
+        use_https: winrmUseHTTPS,
+        username: winrmUsername,
+        password: winrmPassword || undefined,
+        service_type: winrmServiceType,
+        insecure_skip_verify: winrmInsecureSkipVerify,
+        enabled: true,
+      };
+      if (editingWinrmTargetID) {
+        await api.updateWinRMTarget(id, editingWinrmTargetID, req);
+      } else {
+        await api.createWinRMTarget(id, req);
+      }
+      resetWinrmForm();
+      refreshWinrmTargets();
+    } catch (e) {
+      setWinrmError((e as Error).message);
+    } finally {
+      setWinrmBusy(false);
+    }
+  }
+
+  async function deleteWinrmTarget(targetId: string) {
+    if (!id) return;
+    try {
+      await api.deleteWinRMTarget(id, targetId);
+      refreshWinrmTargets();
+    } catch (e) {
+      setWinrmError((e as Error).message);
+    }
+  }
+
   async function handleSaveNotifyEmails() {
     if (!id) return;
     setBusy(true);
@@ -229,7 +321,7 @@ export default function CertificateDetail() {
         </p>
         <p>
           <strong>Key algorithm:</strong> {cert.key_algorithm} (held in Vault —{" "}
-          {cert.key_exportable ? "exportable, for Kubernetes sync only" : "never exportable"})
+          {cert.key_exportable ? "exportable, for Kubernetes/WinRM sync only" : "never exportable"})
         </p>
         <p>
           <strong>Validation method:</strong> {cert.validation_method}
@@ -439,6 +531,140 @@ export default function CertificateDetail() {
                 {k8sTargets.length === 0 && (
                   <tr>
                     <td colSpan={5}>No Kubernetes sync targets yet.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </>
+        )}
+      </div>
+
+      <h3>Windows / WinRM sync targets</h3>
+      <div className="card">
+        {!cert.key_exportable ? (
+          <p style={{ fontSize: 13, color: "var(--muted)" }}>
+            This certificate's key isn't exportable, so it can't be pushed to a Windows host — binding Secure WinRM or LDAPS needs the raw
+            private key, and this platform's Vault key was created non-exportable (the default). Re-issue this certificate with "Sync to
+            Kubernetes, WinRM, or LDAPS" checked to enable this.
+          </p>
+        ) : (
+          <>
+            <p style={{ fontSize: 13, color: "var(--muted)" }}>
+              The platform connects directly to the host over WinRM with the credentials below and imports the certificate — no agent
+              required. Requires network access to the host's WinRM port and an account with rights to manage the certificate store (and,
+              for a WinRM target, WinRM's own listener).
+            </p>
+            {winrmError && <p style={{ color: "var(--danger, #c0392b)" }}>{winrmError}</p>}
+            {hasScope("certs:admin") && !showWinrmForm && (
+              <button className="secondary" onClick={() => setShowWinrmForm(true)} style={{ marginBottom: 12 }}>
+                Add target
+              </button>
+            )}
+            {showWinrmForm && (
+              <div style={{ marginBottom: 16 }}>
+                <div className="field">
+                  <label>Name</label>
+                  <input value={winrmName} onChange={(e) => setWinrmName(e.target.value)} placeholder="dc1" />
+                </div>
+                <div style={{ display: "flex", gap: 16 }}>
+                  <div className="field" style={{ flex: 1 }}>
+                    <label>Host</label>
+                    <input value={winrmHost} onChange={(e) => setWinrmHost(e.target.value)} placeholder="dc1.corp.example.com" />
+                  </div>
+                  <div className="field" style={{ width: 100 }}>
+                    <label>Port</label>
+                    <input type="number" value={winrmPort} onChange={(e) => setWinrmPort(Number(e.target.value))} />
+                  </div>
+                </div>
+                <div className="field">
+                  <label>Bind to</label>
+                  <select value={winrmServiceType} onChange={(e) => setWinrmServiceType(e.target.value as WinRMServiceType)}>
+                    <option value="winrm_https">Secure WinRM (rebinds the HTTPS listener)</option>
+                    <option value="ldaps">LDAPS (imports for Active Directory to pick up)</option>
+                  </select>
+                </div>
+                <div style={{ display: "flex", gap: 16 }}>
+                  <div className="field" style={{ flex: 1 }}>
+                    <label>Username</label>
+                    <input value={winrmUsername} onChange={(e) => setWinrmUsername(e.target.value)} placeholder="CORP\\svc-ssl-sentry" />
+                  </div>
+                  <div className="field" style={{ flex: 1 }}>
+                    <label>Password{editingWinrmTargetID ? " (leave blank to keep the current one)" : ""}</label>
+                    <input type="password" value={winrmPassword} onChange={(e) => setWinrmPassword(e.target.value)} />
+                  </div>
+                </div>
+                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 8 }}>
+                  <input type="checkbox" checked={winrmUseHTTPS} onChange={(e) => setWinrmUseHTTPS(e.target.checked)} />
+                  Connect to WinRM over HTTPS (port 5986)
+                </label>
+                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 12 }}>
+                  <input type="checkbox" checked={winrmInsecureSkipVerify} onChange={(e) => setWinrmInsecureSkipVerify(e.target.checked)} />
+                  Skip TLS verification when connecting to this host's WinRM endpoint
+                </label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    className="primary"
+                    disabled={!winrmName || !winrmHost || !winrmUsername || (!editingWinrmTargetID && !winrmPassword) || winrmBusy}
+                    onClick={submitWinrmTarget}
+                  >
+                    {winrmBusy ? "Saving…" : editingWinrmTargetID ? "Save changes" : "Add target"}
+                  </button>
+                  <button className="secondary" onClick={resetWinrmForm}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Host</th>
+                  <th>Bind to</th>
+                  <th>Status</th>
+                  <th>Last synced</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {winrmTargets.map((t) => (
+                  <tr key={t.id}>
+                    <td>{t.name}</td>
+                    <td>
+                      {t.host}:{t.port}
+                    </td>
+                    <td>{t.service_type === "winrm_https" ? "Secure WinRM" : "LDAPS"}</td>
+                    <td>
+                      {!t.enabled ? (
+                        <span className="pill warn">paused</span>
+                      ) : t.last_sync_error ? (
+                        <span className="pill critical" title={t.last_sync_error}>
+                          error
+                        </span>
+                      ) : t.last_synced_at ? (
+                        <span className="pill ok">synced</span>
+                      ) : (
+                        <span className="pill accent">pending</span>
+                      )}
+                    </td>
+                    <td>{t.last_synced_at ? new Date(t.last_synced_at).toLocaleString() : "never"}</td>
+                    <td style={{ display: "flex", gap: 6 }}>
+                      {hasScope("certs:admin") && (
+                        <>
+                          <button className="secondary" onClick={() => editWinrmTarget(t)}>
+                            Edit
+                          </button>
+                          <button className="secondary" onClick={() => deleteWinrmTarget(t.id)}>
+                            Delete
+                          </button>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {winrmTargets.length === 0 && (
+                  <tr>
+                    <td colSpan={6}>No WinRM sync targets yet.</td>
                   </tr>
                 )}
               </tbody>
