@@ -394,6 +394,8 @@ export const api = {
   getCertificate: (id: string) => request<Certificate>(`/certificates/${id}`),
   getHistory: (id: string) => request<CertificateVersion[]>(`/certificates/${id}/history`),
   getAudit: (id: string) => request<AuditEntry[]>(`/certificates/${id}/audit`),
+  listAuditLog: (filter: { resource?: string; action?: string; limit?: number } = {}) =>
+    request<AuditEntry[]>(`/audit${toQuery({ resource: filter.resource, action: filter.action, limit: filter.limit })}`),
   getCertificatePosture: (id: string) => request<CertificatePosture>(`/certificates/${id}/posture`),
   listK8sTargets: (certificateId: string) => request<K8sTarget[]>(`/certificates/${certificateId}/k8s-targets`),
   createK8sTarget: (certificateId: string, body: K8sTargetRequest) =>

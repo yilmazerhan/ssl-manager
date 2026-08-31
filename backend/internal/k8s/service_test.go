@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yilmazerhan/ssl-manager/backend/internal/audit"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/db"
 )
@@ -48,6 +49,11 @@ func (f *fakeKeyExporter) ExportPrivateKey(context.Context, string) ([]byte, err
 // package's own logic (target CRUD, sync fan-out, per-target error
 // recording) doesn't depend on Vault actually being Vault.
 func testService(t *testing.T) (*Service, certificate.Store, *PostgresStore, *fakeSecretStore) {
+	svc, certs, store, secretStore, _ := testServiceWithAudit(t)
+	return svc, certs, store, secretStore
+}
+
+func testServiceWithAudit(t *testing.T) (*Service, certificate.Store, *PostgresStore, *fakeSecretStore, audit.Store) {
 	t.Helper()
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -66,8 +72,9 @@ func testService(t *testing.T) (*Service, certificate.Store, *PostgresStore, *fa
 	certs := certificate.NewPostgresStore(pool)
 	store := NewPostgresStore(pool)
 	secretStore := newFakeSecretStore()
-	svc := NewService(store, certs, secretStore, &fakeKeyExporter{pem: []byte("fake-private-key-pem")})
-	return svc, certs, store, secretStore
+	auditStore := audit.NewPostgresStore(pool)
+	svc := NewService(store, certs, secretStore, &fakeKeyExporter{pem: []byte("fake-private-key-pem")}, auditStore)
+	return svc, certs, store, secretStore, auditStore
 }
 
 func mustExportableCert(t *testing.T, certs certificate.Store, exportable bool) certificate.Certificate {
@@ -386,5 +393,77 @@ func TestSyncTarget_ReturnsNilOnSuccess(t *testing.T) {
 
 	if err := svc.SyncTarget(ctx, target.ID); err != nil {
 		t.Errorf("expected SyncTarget to succeed, got: %v", err)
+	}
+}
+
+// TestSyncOne_WritesDetailedAuditEntries proves every sync attempt lands
+// on the certificate's own audit trail with enough detail (which target,
+// which cluster/namespace/secret, success or the exact error) to answer
+// "which servers/services got this certificate, and did it work?" without
+// digging through server logs.
+func TestSyncOne_WritesDetailedAuditEntries(t *testing.T) {
+	svc, certs, store, _, auditStore := testServiceWithAudit(t)
+	ctx := context.Background()
+	cert := mustExportableCert(t, certs, true)
+	if _, err := certs.AddVersion(ctx, certificate.Version{
+		CertificateID: cert.ID, SerialNumber: "1", FingerprintSHA256: "abc", PEMCert: "cert-pem", PEMChain: "chain-pem", IssuedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddVersion: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	okTarget, err := svc.CreateTarget(ctx, cert.ID, TargetRequest{
+		Name: "audited-ok", ClusterURL: server.URL, Namespace: "default", SecretName: "app-tls", Token: "tok", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateTarget (ok): %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), okTarget.ID) })
+
+	failTarget, err := svc.CreateTarget(ctx, cert.ID, TargetRequest{
+		Name: "audited-fail", ClusterURL: "http://127.0.0.1:1", Namespace: "default", SecretName: "app-tls-2", Token: "tok", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateTarget (fail): %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), failTarget.ID) })
+
+	entries, err := auditStore.ForResource(ctx, "certificate", cert.ID)
+	if err != nil {
+		t.Fatalf("ForResource: %v", err)
+	}
+
+	var sawSucceeded, sawFailed bool
+	for _, e := range entries {
+		switch e.Action {
+		case "k8s_sync_succeeded":
+			if e.Metadata["target_id"] == okTarget.ID {
+				sawSucceeded = true
+				if e.Metadata["target_name"] != "audited-ok" || e.Metadata["namespace"] != "default" || e.Metadata["secret_name"] != "app-tls" {
+					t.Errorf("expected the success entry to name the target/namespace/secret, got %+v", e.Metadata)
+				}
+			}
+		case "k8s_sync_failed":
+			if e.Metadata["target_id"] == failTarget.ID {
+				sawFailed = true
+				if e.Metadata["error"] == nil || e.Metadata["error"] == "" {
+					t.Errorf("expected the failure entry to include the error, got %+v", e.Metadata)
+				}
+			}
+		}
+	}
+	if !sawSucceeded {
+		t.Errorf("expected a k8s_sync_succeeded audit entry for the reachable target")
+	}
+	if !sawFailed {
+		t.Errorf("expected a k8s_sync_failed audit entry for the unreachable target")
 	}
 }

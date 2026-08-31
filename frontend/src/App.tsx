@@ -9,6 +9,7 @@ import Integrations from "./pages/Integrations";
 import AdminUsers from "./pages/AdminUsers";
 import Discovery from "./pages/Discovery";
 import NotificationSettings from "./pages/NotificationSettings";
+import AuditLog from "./pages/AuditLog";
 import { useAuth } from "./auth/AuthContext";
 import {
   ShieldCheckIcon,
@@ -19,6 +20,7 @@ import {
   UsersIcon,
   RadarIcon,
   BellIcon,
+  ScrollTextIcon,
   LogoutIcon,
 } from "./components/Icons";
 
@@ -83,6 +85,10 @@ export default function App() {
                 <BellIcon />
                 Notifications
               </NavLink>
+              <NavLink to="/admin/audit">
+                <ScrollTextIcon />
+                Audit log
+              </NavLink>
             </>
           )}
         </nav>
@@ -113,6 +119,7 @@ export default function App() {
           {isAdmin && <Route path="/admin/users" element={<AdminUsers />} />}
           {isAdmin && <Route path="/admin/discovery" element={<Discovery />} />}
           {isAdmin && <Route path="/admin/notifications" element={<NotificationSettings />} />}
+          {isAdmin && <Route path="/admin/audit" element={<AuditLog />} />}
         </Routes>
       </main>
     </div>

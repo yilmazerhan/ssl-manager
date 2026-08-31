@@ -148,6 +148,56 @@ func TestRunDueSchedules_FiresAndReschedules(t *testing.T) {
 	})
 }
 
+// TestRunDueSchedules_AuditsTheScanItStarts proves a schedule-fired scan is
+// audited too, not just ones started through the API — otherwise every
+// automatic scan this platform runs would be invisible in the audit log,
+// since only a manually-created scan has an admin's request to attribute
+// the "started" entry to (see fireSchedule's own comment on this).
+func TestRunDueSchedules_AuditsTheScanItStarts(t *testing.T) {
+	svc, _, store, userID, auditStore := testDiscoveryServiceWithAudit(t)
+	ctx := context.Background()
+
+	sch, err := svc.CreateSchedule(ctx, ScheduleRequest{
+		Name: "audited-sweep-test", Targets: []string{"127.0.0.1"}, Ports: []int{1}, IntervalMinutes: MinIntervalMinutes,
+	}, userID)
+	if err != nil {
+		t.Fatalf("CreateSchedule: %v", err)
+	}
+	t.Cleanup(func() { _ = store.DeleteSchedule(context.Background(), sch.ID) })
+
+	sch.NextRunAt = time.Now().Add(-time.Second)
+	if err := store.UpdateSchedule(ctx, sch); err != nil {
+		t.Fatalf("force schedule due: %v", err)
+	}
+
+	svc.runDueSchedules(ctx)
+
+	reloaded, err := store.GetSchedule(ctx, sch.ID)
+	if err != nil {
+		t.Fatalf("GetSchedule: %v", err)
+	}
+	if reloaded.LastScanID == "" {
+		t.Fatalf("expected last_scan_id to be set to the scan the fire started")
+	}
+	t.Cleanup(func() {
+		store.pool.Exec(context.Background(), `DELETE FROM discovery_scan WHERE id = $1`, reloaded.LastScanID)
+	})
+
+	entries, err := auditStore.ForResource(ctx, "discovery_scan", reloaded.LastScanID)
+	if err != nil {
+		t.Fatalf("ForResource: %v", err)
+	}
+	var found bool
+	for _, e := range entries {
+		if e.Action == "discovery_scan_started" && e.Metadata["schedule_id"] == sch.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a discovery_scan_started audit entry naming schedule %s", sch.ID)
+	}
+}
+
 func TestVulnerabilitySummary_CountsLatestPerHostPortOnly(t *testing.T) {
 	_, _, store, _ := testDiscoveryService(t)
 	ctx := context.Background()

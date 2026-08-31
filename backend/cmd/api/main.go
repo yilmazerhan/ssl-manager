@@ -89,7 +89,7 @@ func main() {
 	apiKeys := apikey.NewPostgresStore(pool)
 	downloadTokens := downloadtoken.NewPostgresStore(pool)
 	auditStore := audit.NewPostgresStore(pool)
-	discoveryService := discovery.NewService(discovery.NewPostgresStore(pool), certs)
+	discoveryService := discovery.NewService(discovery.NewPostgresStore(pool), certs, auditStore)
 	if err := discoveryService.RecoverInterruptedScans(ctx); err != nil {
 		log.Printf("discovery: recover interrupted scans: %v", err)
 	}
@@ -186,8 +186,8 @@ func main() {
 
 	orderService := order.NewService(orders, certs, keyManager, authorities)
 
-	k8sService := k8s.NewService(k8s.NewPostgresStore(pool), certs, secretStore, keyManager)
-	winrmService := winrm.NewService(winrm.NewPostgresStore(pool), certs, secretStore, keyManager)
+	k8sService := k8s.NewService(k8s.NewPostgresStore(pool), certs, secretStore, keyManager, auditStore)
+	winrmService := winrm.NewService(winrm.NewPostgresStore(pool), certs, secretStore, keyManager, auditStore)
 	orderService.SetOnIssued(func(_ context.Context, certificateID string) {
 		// Both run detached from the issuance/renewal request's own
 		// context — an unreachable cluster/host must never hold up or

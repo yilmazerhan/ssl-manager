@@ -8,17 +8,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yilmazerhan/ssl-manager/backend/internal/audit"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
 )
 
 type Service struct {
 	store   Store
 	certs   certificate.Store
+	audit   audit.Store
 	cancels sync.Map // scan ID -> context.CancelFunc, only while a scan is actually running
 }
 
-func NewService(store Store, certs certificate.Store) *Service {
-	return &Service{store: store, certs: certs}
+func NewService(store Store, certs certificate.Store, auditStore audit.Store) *Service {
+	return &Service{store: store, certs: certs, audit: auditStore}
 }
 
 // scanParams is what every field of CreateScanRequest/ScheduleRequest
@@ -239,6 +241,18 @@ func (s *Service) fireSchedule(ctx context.Context, sch Schedule) {
 		log.Printf("discovery: fire schedule %s (%s): %v", sch.ID, sch.Name, err)
 	} else {
 		sch.LastScanID = sc.ID
+		// A manually created scan is audited by the HTTP handler (it has
+		// the requesting admin's identity); a scheduled one has no request
+		// to attribute it to, so it's audited here instead — otherwise
+		// every automatic scan this platform runs would be invisible in
+		// the audit trail.
+		_ = s.audit.Write(ctx, audit.Entry{
+			Actor: "system:discovery-scheduler", Action: "discovery_scan_started", Resource: "discovery_scan", ResourceID: sc.ID,
+			Metadata: map[string]interface{}{
+				"schedule_id": sch.ID, "schedule_name": sch.Name,
+				"targets": sch.Targets, "ports": sc.Ports, "total_targets": sc.TotalTargets,
+			},
+		})
 	}
 	if err := s.store.UpdateSchedule(ctx, sch); err != nil {
 		log.Printf("discovery: update schedule %s after firing: %v", sch.ID, err)
@@ -269,6 +283,7 @@ func (s *Service) run(ctx context.Context, sc Scan, hosts []string, ports []int)
 			if err := s.store.UpdateScan(context.Background(), sc); err != nil {
 				log.Printf("discovery: mark panicked scan %s failed: %v", sc.ID, err)
 			}
+			s.auditScanCompletion(context.Background(), sc, 0)
 		}
 	}()
 
@@ -288,6 +303,7 @@ func (s *Service) run(ctx context.Context, sc Scan, hosts []string, ports []int)
 
 	storeCtx := context.Background() // results must persist even if the scan itself is canceled mid-run
 	timeout := time.Duration(sc.TimeoutMS) * time.Millisecond
+	vulnCount := 0
 	runProbes(ctx, hosts, ports, timeout, sc.Concurrency, func(pr probeResult) {
 		result := s.reconcile(pr, index)
 		result.ScanID = sc.ID
@@ -304,6 +320,9 @@ func (s *Service) run(ctx context.Context, sc Scan, hosts []string, ports []int)
 		case MatchStatusNotInInventory:
 			sc.NewCount++
 		}
+		if len(result.Vulnerabilities) > 0 {
+			vulnCount++
+		}
 	})
 
 	completed := time.Now()
@@ -319,6 +338,26 @@ func (s *Service) run(ctx context.Context, sc Scan, hosts []string, ports []int)
 	if err := s.store.UpdateScan(storeCtx, sc); err != nil {
 		log.Printf("discovery: mark scan %s complete: %v", sc.ID, err)
 	}
+	s.auditScanCompletion(storeCtx, sc, vulnCount)
+}
+
+// auditScanCompletion records a scan's outcome on the audit trail —
+// scanned/matched/mismatched/new-endpoint counts and how many endpoints
+// came back with a classified vulnerability — regardless of whether the
+// scan was started manually, by a schedule, or crashed outright. Manual
+// and scheduled starts are each audited separately at the point they're
+// created (the HTTP handler and fireSchedule, respectively), since only
+// there is who or what started it known.
+func (s *Service) auditScanCompletion(ctx context.Context, sc Scan, vulnCount int) {
+	_ = s.audit.Write(ctx, audit.Entry{
+		Actor: "system:discovery-scan", Action: "discovery_scan_completed", Resource: "discovery_scan", ResourceID: sc.ID,
+		Metadata: map[string]interface{}{
+			"name": sc.Name, "status": string(sc.Status), "error": sc.Error,
+			"total_targets": sc.TotalTargets, "scanned_count": sc.ScannedCount,
+			"matched_count": sc.MatchedCount, "mismatch_count": sc.MismatchCount, "new_count": sc.NewCount,
+			"vulnerable_count": vulnCount,
+		},
+	})
 }
 
 type inventoryEntry struct {

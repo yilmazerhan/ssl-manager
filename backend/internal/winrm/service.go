@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/yilmazerhan/ssl-manager/backend/internal/audit"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/secrets"
 )
@@ -24,10 +25,11 @@ type Service struct {
 	certs   certificate.Store
 	secrets secrets.SecretStore
 	keys    KeyExporter
+	audit   audit.Store
 }
 
-func NewService(store Store, certs certificate.Store, secretStore secrets.SecretStore, keys KeyExporter) *Service {
-	return &Service{store: store, certs: certs, secrets: secretStore, keys: keys}
+func NewService(store Store, certs certificate.Store, secretStore secrets.SecretStore, keys KeyExporter, auditStore audit.Store) *Service {
+	return &Service{store: store, certs: certs, secrets: secretStore, keys: keys, audit: auditStore}
 }
 
 func secretPath(targetID string) string { return "winrm-targets/" + targetID }
@@ -203,13 +205,36 @@ func (s *Service) syncOne(ctx context.Context, target Target, pfx []byte) {
 	target.LastSyncedAt = &now
 	target.LastSyncError = ""
 
-	if err := s.pushCertificate(ctx, target, pfx); err != nil {
-		target.LastSyncError = err.Error()
-		log.Printf("winrm: sync target %s (%s@%s:%d): %v", target.ID, target.Username, target.Host, target.Port, err)
+	pushErr := s.pushCertificate(ctx, target, pfx)
+	if pushErr != nil {
+		target.LastSyncError = pushErr.Error()
+		log.Printf("winrm: sync target %s (%s@%s:%d): %v", target.ID, target.Username, target.Host, target.Port, pushErr)
 	}
 	if err := s.store.Update(ctx, target); err != nil {
 		log.Printf("winrm: record sync result for target %s: %v", target.ID, err)
 	}
+	s.auditSync(ctx, target, pushErr)
+}
+
+// auditSync records the outcome of a single push attempt on the
+// certificate's own audit trail — which host/service was touched and
+// whether it succeeded — regardless of what triggered it: the immediate
+// sync on target creation, the automatic post-issuance/renewal fan-out, or
+// an admin's manual "Sync now".
+func (s *Service) auditSync(ctx context.Context, target Target, pushErr error) {
+	action := "winrm_sync_succeeded"
+	metadata := map[string]interface{}{
+		"target_id": target.ID, "target_name": target.Name,
+		"host": target.Host, "port": target.Port, "service_type": string(target.ServiceType),
+	}
+	if pushErr != nil {
+		action = "winrm_sync_failed"
+		metadata["error"] = pushErr.Error()
+	}
+	_ = s.audit.Write(ctx, audit.Entry{
+		Actor: "system:winrm-sync", Action: action, Resource: "certificate", ResourceID: target.CertificateID,
+		Metadata: metadata,
+	})
 }
 
 func (s *Service) pushCertificate(ctx context.Context, target Target, pfx []byte) error {

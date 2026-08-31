@@ -113,6 +113,23 @@ func (h *handlers) certificateAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, entries)
 }
 
+// listAuditLog is the system-wide audit feed (admin-only): every action
+// this platform records, not just one certificate's own trail — server/
+// service sync results, SSL discovery scans, certificate issuance and
+// renewal, user and API key management, and so on. resource/action query
+// params narrow it; both are exact matches, left blank to not filter.
+func (h *handlers) listAuditLog(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	entries, err := h.deps.Audit.List(r.Context(), audit.ListFilter{
+		Resource: r.URL.Query().Get("resource"), Action: r.URL.Query().Get("action"), Limit: limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load audit log")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
 // issueDownloadToken is the "explicit UI confirmation" docs/plan.html
 // section 07 requires before key material can be exported: a short-lived,
 // single-use token that downloadCertificate then redeems exactly once.

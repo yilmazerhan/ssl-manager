@@ -18,11 +18,17 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/yilmazerhan/ssl-manager/backend/internal/audit"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/db"
 )
 
 func testDiscoveryService(t *testing.T) (*Service, *certificate.PostgresStore, *PostgresStore, string) {
+	svc, certs, store, userID, _ := testDiscoveryServiceWithAudit(t)
+	return svc, certs, store, userID
+}
+
+func testDiscoveryServiceWithAudit(t *testing.T) (*Service, *certificate.PostgresStore, *PostgresStore, string, audit.Store) {
 	t.Helper()
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -49,7 +55,8 @@ func testDiscoveryService(t *testing.T) (*Service, *certificate.PostgresStore, *
 
 	certs := certificate.NewPostgresStore(pool)
 	store := NewPostgresStore(pool)
-	return NewService(store, certs), certs, store, userID
+	auditStore := audit.NewPostgresStore(pool)
+	return NewService(store, certs, auditStore), certs, store, userID, auditStore
 }
 
 // listenerWithCert starts a real TLS listener presenting a certificate for
@@ -222,6 +229,55 @@ func TestService_FullScan_ReconcilesAgainstInventory(t *testing.T) {
 	}
 	if r, ok := byDomain["discovery-orphan.example.test"]; !ok || r.MatchStatus != MatchStatusNotInInventory {
 		t.Errorf("expected discovery-orphan to be MatchStatusNotInInventory, got %+v", r)
+	}
+}
+
+// TestService_FullScan_WritesCompletionAuditEntry proves a finished scan
+// lands on the audit trail with its result counts — matched, mismatched,
+// newly-discovered, and how many endpoints came back with a classified
+// vulnerability — so "what SSL scans ran and what did they find" is
+// answerable from the audit log, not just the scan's own detail page.
+func TestService_FullScan_WritesCompletionAuditEntry(t *testing.T) {
+	svc, _, store, userID, auditStore := testDiscoveryServiceWithAudit(t)
+	ctx := context.Background()
+
+	addr, _, closeListener := listenerWithCert(t, "discovery-audit.example.test")
+	defer closeListener()
+	host, port := mustPort(t, addr)
+
+	sc, err := svc.CreateScan(ctx, CreateScanRequest{
+		Name: "audit test", Targets: []string{host}, Ports: []int{port},
+	}, userID)
+	if err != nil {
+		t.Fatalf("CreateScan: %v", err)
+	}
+	t.Cleanup(func() { store.pool.Exec(context.Background(), `DELETE FROM discovery_scan WHERE id = $1`, sc.ID) })
+
+	final := waitForTerminalStatus(t, svc, sc.ID)
+	if final.Status != ScanStatusCompleted {
+		t.Fatalf("expected the scan to complete, got %s (%s)", final.Status, final.Error)
+	}
+
+	entries, err := auditStore.ForResource(ctx, "discovery_scan", sc.ID)
+	if err != nil {
+		t.Fatalf("ForResource: %v", err)
+	}
+	var found bool
+	for _, e := range entries {
+		if e.Action != "discovery_scan_completed" {
+			continue
+		}
+		found = true
+		if e.Metadata["status"] != string(ScanStatusCompleted) {
+			t.Errorf("expected status %q in the completion entry, got %+v", ScanStatusCompleted, e.Metadata)
+		}
+		scannedCount, _ := e.Metadata["scanned_count"].(float64) // json.Unmarshal decodes numbers as float64
+		if int(scannedCount) != final.ScannedCount {
+			t.Errorf("expected scanned_count %d, got %+v", final.ScannedCount, e.Metadata["scanned_count"])
+		}
+	}
+	if !found {
+		t.Errorf("expected a discovery_scan_completed audit entry for scan %s", sc.ID)
 	}
 }
 

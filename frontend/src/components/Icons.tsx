@@ -162,3 +162,13 @@ export const AlertTriangleIcon = (p: IconProps) =>
     </>,
     p
   );
+
+export const ScrollTextIcon = (p: IconProps) =>
+  base(
+    <>
+      <path d="M6 3.5h11a2 2 0 012 2V16a2 2 0 01-2 2H8" />
+      <path d="M6 3.5A2 2 0 004 5.5V17a2 2 0 002 2h1" />
+      <path d="M8 8h7M8 12h7" />
+    </>,
+    p
+  );

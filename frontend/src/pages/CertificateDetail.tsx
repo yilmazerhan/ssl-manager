@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
+import { summarizeAuditMetadata } from "../lib/auditFormat";
 import {
   api,
   AuditEntry,
@@ -760,6 +761,7 @@ export default function CertificateDetail() {
             <th>Actor</th>
             <th>Action</th>
             <th>Scope</th>
+            <th>Details</th>
           </tr>
         </thead>
         <tbody>
@@ -769,11 +771,12 @@ export default function CertificateDetail() {
               <td>{e.Actor}</td>
               <td>{e.Action}</td>
               <td>{e.Scope}</td>
+              <td>{summarizeAuditMetadata(e)}</td>
             </tr>
           ))}
           {auditLog.length === 0 && (
             <tr>
-              <td colSpan={4}>No audit events yet.</td>
+              <td colSpan={5}>No audit events yet.</td>
             </tr>
           )}
         </tbody>

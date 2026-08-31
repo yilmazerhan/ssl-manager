@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/yilmazerhan/ssl-manager/backend/internal/audit"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/certificate"
 	"github.com/yilmazerhan/ssl-manager/backend/internal/secrets"
 )
@@ -24,10 +25,11 @@ type Service struct {
 	certs   certificate.Store
 	secrets secrets.SecretStore
 	keys    KeyExporter
+	audit   audit.Store
 }
 
-func NewService(store Store, certs certificate.Store, secretStore secrets.SecretStore, keys KeyExporter) *Service {
-	return &Service{store: store, certs: certs, secrets: secretStore, keys: keys}
+func NewService(store Store, certs certificate.Store, secretStore secrets.SecretStore, keys KeyExporter, auditStore audit.Store) *Service {
+	return &Service{store: store, certs: certs, secrets: secretStore, keys: keys, audit: auditStore}
 }
 
 func secretPath(targetID string) string { return "k8s-targets/" + targetID }
@@ -191,13 +193,36 @@ func (s *Service) syncOne(ctx context.Context, target Target, certPEM, keyPEM []
 	target.LastSyncedAt = &now
 	target.LastSyncError = ""
 
-	if err := s.pushSecret(ctx, target, certPEM, keyPEM); err != nil {
-		target.LastSyncError = err.Error()
-		log.Printf("k8s: sync target %s (%s/%s): %v", target.ID, target.Namespace, target.SecretName, err)
+	pushErr := s.pushSecret(ctx, target, certPEM, keyPEM)
+	if pushErr != nil {
+		target.LastSyncError = pushErr.Error()
+		log.Printf("k8s: sync target %s (%s/%s): %v", target.ID, target.Namespace, target.SecretName, pushErr)
 	}
 	if err := s.store.Update(ctx, target); err != nil {
 		log.Printf("k8s: record sync result for target %s: %v", target.ID, err)
 	}
+	s.auditSync(ctx, target, pushErr)
+}
+
+// auditSync records the outcome of a single push attempt on the
+// certificate's own audit trail — which server/service was touched and
+// whether it succeeded — regardless of what triggered it: the immediate
+// sync on target creation, the automatic post-issuance/renewal fan-out, or
+// an admin's manual "Sync now".
+func (s *Service) auditSync(ctx context.Context, target Target, pushErr error) {
+	action := "k8s_sync_succeeded"
+	metadata := map[string]interface{}{
+		"target_id": target.ID, "target_name": target.Name,
+		"cluster_url": target.ClusterURL, "namespace": target.Namespace, "secret_name": target.SecretName,
+	}
+	if pushErr != nil {
+		action = "k8s_sync_failed"
+		metadata["error"] = pushErr.Error()
+	}
+	_ = s.audit.Write(ctx, audit.Entry{
+		Actor: "system:k8s-sync", Action: action, Resource: "certificate", ResourceID: target.CertificateID,
+		Metadata: metadata,
+	})
 }
 
 func (s *Service) pushSecret(ctx context.Context, target Target, certPEM, keyPEM []byte) error {

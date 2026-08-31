@@ -250,6 +250,9 @@ func (f *fakeAuditStore) Write(_ context.Context, e audit.Entry) error {
 func (f *fakeAuditStore) ForResource(context.Context, string, string) ([]audit.Record, error) {
 	return nil, nil
 }
+func (f *fakeAuditStore) List(context.Context, audit.ListFilter) ([]audit.Record, error) {
+	return nil, nil
+}
 
 type fakeNotifier struct {
 	mu     sync.Mutex

@@ -25,9 +25,19 @@ type Record struct {
 	CreatedAt time.Time
 }
 
+// ListFilter narrows the system-wide audit feed (audit page, not a single
+// certificate's own trail). Resource/Action are exact matches; either may
+// be left blank to not filter on it.
+type ListFilter struct {
+	Resource string
+	Action   string
+	Limit    int
+}
+
 type Store interface {
 	Write(ctx context.Context, e Entry) error
 	ForResource(ctx context.Context, resource, resourceID string) ([]Record, error)
+	List(ctx context.Context, filter ListFilter) ([]Record, error)
 }
 
 type PostgresStore struct {
@@ -66,6 +76,45 @@ func (s *PostgresStore) ForResource(ctx context.Context, resource, resourceID st
 	`, resource, resourceID)
 	if err != nil {
 		return nil, fmt.Errorf("audit: query: %w", err)
+	}
+	defer rows.Close()
+
+	out := []Record{}
+	for rows.Next() {
+		var r Record
+		var metaJSON []byte
+		if err := rows.Scan(&r.Actor, &r.Action, &r.Resource, &r.ResourceID, &r.Scope, &metaJSON, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("audit: scan: %w", err)
+		}
+		if len(metaJSON) > 0 {
+			_ = json.Unmarshal(metaJSON, &r.Metadata)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) List(ctx context.Context, filter ListFilter) ([]Record, error) {
+	limit := filter.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+
+	// Action is matched as a substring (ILIKE), not exact — action names
+	// like "k8s_sync_failed" and "winrm_sync_failed" share a meaningful
+	// suffix, and letting an admin filter on "sync_failed" across both
+	// (or "renewal" across renewal_succeeded/renewal_failed) is far more
+	// useful than requiring the exact string.
+	query := `
+		SELECT actor, action, resource, coalesce(resource_id, ''), coalesce(scope, ''), metadata, created_at
+		FROM audit_log
+		WHERE ($1 = '' OR resource = $1) AND ($2 = '' OR action ILIKE '%' || $2 || '%')
+		ORDER BY created_at DESC
+		LIMIT $3
+	`
+	rows, err := s.pool.Query(ctx, query, filter.Resource, filter.Action, limit)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list: %w", err)
 	}
 	defer rows.Close()
 
