@@ -198,6 +198,57 @@ func TestRunDueSchedules_AuditsTheScanItStarts(t *testing.T) {
 	}
 }
 
+// TestFireSchedule_DoesNotClobberConcurrentEdit proves firing a schedule
+// only ever writes back the bookkeeping fields it owns (last_run_at/
+// last_scan_id/next_run_at), never the schedule's actual configuration —
+// so an admin's edit that lands between fireSchedule reading its Schedule
+// snapshot and writing its result back isn't silently reverted.
+func TestFireSchedule_DoesNotClobberConcurrentEdit(t *testing.T) {
+	svc, _, store, userID := testDiscoveryService(t)
+	ctx := context.Background()
+
+	sch, err := svc.CreateSchedule(ctx, ScheduleRequest{
+		Name: "original-name", Targets: []string{"127.0.0.1"}, Ports: []int{1}, IntervalMinutes: MinIntervalMinutes, Enabled: true,
+	}, userID)
+	if err != nil {
+		t.Fatalf("CreateSchedule: %v", err)
+	}
+	t.Cleanup(func() { _ = store.DeleteSchedule(context.Background(), sch.ID) })
+
+	// fireSchedule receives this stale, pre-edit snapshot — as if an
+	// admin's PUT (renaming it and disabling it) landed in Postgres right
+	// after the scheduler's sweep already fetched the old row.
+	staleSnapshot := sch
+
+	if _, err := svc.UpdateSchedule(ctx, sch.ID, ScheduleRequest{
+		Name: "renamed-by-admin", Targets: sch.Targets, Ports: sch.Ports, IntervalMinutes: sch.IntervalMinutes, Enabled: false,
+	}); err != nil {
+		t.Fatalf("UpdateSchedule (simulated concurrent admin edit): %v", err)
+	}
+
+	svc.fireSchedule(ctx, staleSnapshot)
+
+	reloaded, err := store.GetSchedule(ctx, sch.ID)
+	if err != nil {
+		t.Fatalf("GetSchedule: %v", err)
+	}
+	t.Cleanup(func() {
+		if reloaded.LastScanID != "" {
+			store.pool.Exec(context.Background(), `DELETE FROM discovery_scan WHERE id = $1`, reloaded.LastScanID)
+		}
+	})
+
+	if reloaded.Name != "renamed-by-admin" {
+		t.Errorf("expected the admin's rename to survive fireSchedule's writeback, got name %q", reloaded.Name)
+	}
+	if reloaded.Enabled {
+		t.Errorf("expected the admin's disable to survive fireSchedule's writeback, got enabled=%v", reloaded.Enabled)
+	}
+	if reloaded.LastRunAt == nil {
+		t.Errorf("expected fireSchedule to still have recorded last_run_at")
+	}
+}
+
 func TestVulnerabilitySummary_CountsLatestPerHostPortOnly(t *testing.T) {
 	_, _, store, _ := testDiscoveryService(t)
 	ctx := context.Background()

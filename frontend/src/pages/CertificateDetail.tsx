@@ -413,9 +413,9 @@ export default function CertificateDetail() {
               )}
             </p>
             <p>
-              <strong>Key usage:</strong> {posture.key_usage.join(", ") || "—"}
+              <strong>Key usage:</strong> {(posture.key_usage ?? []).join(", ") || "—"}
             </p>
-            {posture.ext_key_usage.length > 0 && (
+            {(posture.ext_key_usage ?? []).length > 0 && (
               <p>
                 <strong>Extended key usage:</strong> {posture.ext_key_usage.join(", ")}
               </p>

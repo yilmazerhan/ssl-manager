@@ -228,19 +228,26 @@ func (s *Service) runDueSchedules(ctx context.Context) {
 // scan succeeded — a schedule with a target that's since become invalid
 // (e.g. expandTargets now rejects it) would otherwise fire on every single
 // one-minute tick forever instead of just failing once per interval.
+//
+// It writes back only through RecordScheduleRun (last_run_at/last_scan_id/
+// next_run_at), never a full UpdateSchedule of the in-memory sch this
+// method received from DueSchedules — that snapshot can be stale by the
+// time CreateScan returns (a slow scan-start), and a full-row rewrite
+// would silently clobber a concurrent admin edit (e.g. PUT .../schedules/
+// {id} disabling it) with this stale copy's old name/targets/enabled.
 func (s *Service) fireSchedule(ctx context.Context, sch Schedule) {
 	now := time.Now()
-	sch.LastRunAt = &now
-	sch.NextRunAt = now.Add(time.Duration(sch.IntervalMinutes) * time.Minute)
+	nextRunAt := now.Add(time.Duration(sch.IntervalMinutes) * time.Minute)
 
 	sc, err := s.CreateScan(ctx, CreateScanRequest{
 		Name: sch.Name, Description: sch.Description, Targets: sch.Targets,
 		Ports: sch.Ports, TimeoutMS: sch.TimeoutMS, Concurrency: sch.Concurrency,
 	}, sch.CreatedBy)
+	var lastScanID string
 	if err != nil {
 		log.Printf("discovery: fire schedule %s (%s): %v", sch.ID, sch.Name, err)
 	} else {
-		sch.LastScanID = sc.ID
+		lastScanID = sc.ID
 		// A manually created scan is audited by the HTTP handler (it has
 		// the requesting admin's identity); a scheduled one has no request
 		// to attribute it to, so it's audited here instead — otherwise
@@ -254,7 +261,7 @@ func (s *Service) fireSchedule(ctx context.Context, sch Schedule) {
 			},
 		})
 	}
-	if err := s.store.UpdateSchedule(ctx, sch); err != nil {
+	if err := s.store.RecordScheduleRun(ctx, sch.ID, now, nextRunAt, lastScanID); err != nil {
 		log.Printf("discovery: update schedule %s after firing: %v", sch.ID, err)
 	}
 }

@@ -19,6 +19,13 @@ type Store interface {
 	Create(ctx context.Context, o Order) (Order, error)
 	Get(ctx context.Context, id string) (Order, error)
 	Update(ctx context.Context, o Order) error
+	// UpdateIfStatus writes o only if the row's current status still
+	// equals expected, atomically (a single conditional UPDATE) — the
+	// guard Validate uses to claim an order before issuing, so two
+	// concurrent Validate calls on the same order can't both pass the
+	// check and both submit the CSR to the CA. Returns whether the write
+	// actually happened; false means someone else already claimed it.
+	UpdateIfStatus(ctx context.Context, o Order, expected Status) (bool, error)
 }
 
 type PostgresStore struct {
@@ -80,6 +87,25 @@ func (s *PostgresStore) Update(ctx context.Context, o Order) error {
 		return fmt.Errorf("order: update: %w", err)
 	}
 	return nil
+}
+
+func (s *PostgresStore) UpdateIfStatus(ctx context.Context, o Order, expected Status) (bool, error) {
+	challengeJSON, err := json.Marshal(o.Challenges)
+	if err != nil {
+		return false, fmt.Errorf("order: marshal challenges: %w", err)
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE certificate_order
+		SET status = $2, challenge_details = $3, certificate_id = $4,
+			error = $5, attempt_count = $6, completed_at = $7
+		WHERE id = $1 AND status = $8
+	`, o.ID, o.Status, challengeJSON, nullableUUID(o.CertificateID),
+		nullableString(o.Error), o.AttemptCount, o.CompletedAt, expected)
+	if err != nil {
+		return false, fmt.Errorf("order: update if status: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 func nullableString(s string) interface{} {

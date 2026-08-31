@@ -42,6 +42,16 @@ func TestList_FiltersByResourceAndSubstringAction(t *testing.T) {
 	resourceA := "audit-list-test-a-" + t.Name()
 	resourceB := "audit-list-test-b-" + t.Name()
 
+	// This table is append-only by design (see the package doc) — Store
+	// exposes no Delete — so clean up directly through the pool this
+	// white-box test already has access to. Without this, re-running the
+	// test against the same persistent Postgres instance (this suite never
+	// resets it between runs) would accumulate duplicate rows under the
+	// same deterministic resource name every time.
+	t.Cleanup(func() {
+		s.pool.Exec(context.Background(), `DELETE FROM audit_log WHERE resource IN ($1, $2)`, resourceA, resourceB)
+	})
+
 	entries := []Entry{
 		{Actor: "system:k8s-sync", Action: "k8s_sync_failed", Resource: resourceA, ResourceID: "1"},
 		{Actor: "system:winrm-sync", Action: "winrm_sync_failed", Resource: resourceA, ResourceID: "2"},

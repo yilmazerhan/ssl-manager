@@ -25,6 +25,14 @@ type Store interface {
 	Versions(ctx context.Context, certificateID string) ([]Version, error)
 	LatestVersion(ctx context.Context, certificateID string) (Version, error)
 
+	// FinalizeNewCertificate and FinalizeRenewal each wrap two writes
+	// (create-or-update the certificate row, then insert its new version)
+	// in a single transaction — see their own doc comments on why a
+	// caller (order.Service.Validate) must never do these as two separate
+	// unguarded calls.
+	FinalizeNewCertificate(ctx context.Context, c Certificate, v Version) (Certificate, Version, error)
+	FinalizeRenewal(ctx context.Context, id string, notBefore, notAfter time.Time, caReference string, v Version) (Version, error)
+
 	// Stats aggregates the inventory for the dashboard/reports — real SQL
 	// GROUP BY, not counting an in-memory List() result, so it stays cheap
 	// regardless of inventory size. team scopes every breakdown to one
@@ -193,6 +201,94 @@ func (s *PostgresStore) DueForRenewal(ctx context.Context, asOf time.Time) ([]Ce
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// FinalizeNewCertificate stores a freshly-issued certificate and its first
+// version atomically. order.Service.Validate used to call Create and
+// AddVersion as two separate, unguarded writes — if AddVersion failed
+// after Create had already committed, the order would correctly report
+// failure, but an orphaned "active" certificate with no version would be
+// left behind: LatestVersion, posture, download, and K8s/WinRM sync all
+// break for it from then on, with nothing in the UI revealing why.
+// Wrapping both in one transaction means either both land or neither does.
+func (s *PostgresStore) FinalizeNewCertificate(ctx context.Context, c Certificate, v Version) (Certificate, Version, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Certificate{}, Version{}, fmt.Errorf("certificate: begin finalize new certificate: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	row := tx.QueryRow(ctx, `
+		INSERT INTO certificate
+			(common_name, sans, ca_provider, validation_method, status, not_before, not_after,
+			 key_algorithm, key_ref, key_exportable, ca_reference, owning_team, auto_renew, renew_before_days,
+			 organization, organizational_unit, country, state, locality)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+		RETURNING `+certificateColumns, c.CommonName, c.SANs, c.CAProvider, c.ValidationMethod, c.Status, c.NotBefore, c.NotAfter,
+		c.KeyAlgorithm, c.KeyRef, c.KeyExportable, nullableString(c.CAReference), c.OwningTeam, c.AutoRenew, c.RenewBeforeDays,
+		nullableString(c.Organization), nullableString(c.OrganizationalUnit), nullableString(c.Country),
+		nullableString(c.State), nullableString(c.Locality))
+	created, err := scanCertificate(row)
+	if err != nil {
+		return Certificate{}, Version{}, err
+	}
+
+	v.CertificateID = created.ID
+	versionRow := tx.QueryRow(ctx, `
+		INSERT INTO certificate_version
+			(certificate_id, serial_number, fingerprint_sha256, pem_cert, pem_chain, issued_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, certificate_id, serial_number, fingerprint_sha256, pem_cert, pem_chain, issued_at
+	`, v.CertificateID, v.SerialNumber, v.FingerprintSHA256, v.PEMCert, v.PEMChain, v.IssuedAt)
+	createdVersion, err := scanVersion(versionRow)
+	if err != nil {
+		return Certificate{}, Version{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Certificate{}, Version{}, fmt.Errorf("certificate: commit finalize new certificate: %w", err)
+	}
+	return created, createdVersion, nil
+}
+
+// FinalizeRenewal updates a renewed certificate's validity/CA reference
+// and stores its new version atomically — the renewal-path counterpart to
+// FinalizeNewCertificate, and for the same reason: UpdateAfterRenewal and
+// AddVersion used to be two separate writes, so a failure in the second
+// could leave the certificate row claiming a fresh expiry date while the
+// actually-stored certificate material is still the old, soon-to-expire
+// one — DueForRenewal would then never flag it again, silently.
+func (s *PostgresStore) FinalizeRenewal(ctx context.Context, id string, notBefore, notAfter time.Time, caReference string, v Version) (Version, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Version{}, fmt.Errorf("certificate: begin finalize renewal: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE certificate
+		SET not_before = $2, not_after = $3, ca_reference = $4, status = 'active', updated_at = now()
+		WHERE id = $1
+	`, id, notBefore, notAfter, nullableString(caReference)); err != nil {
+		return Version{}, fmt.Errorf("certificate: update after renewal: %w", err)
+	}
+
+	v.CertificateID = id
+	row := tx.QueryRow(ctx, `
+		INSERT INTO certificate_version
+			(certificate_id, serial_number, fingerprint_sha256, pem_cert, pem_chain, issued_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, certificate_id, serial_number, fingerprint_sha256, pem_cert, pem_chain, issued_at
+	`, v.CertificateID, v.SerialNumber, v.FingerprintSHA256, v.PEMCert, v.PEMChain, v.IssuedAt)
+	createdVersion, err := scanVersion(row)
+	if err != nil {
+		return Version{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Version{}, fmt.Errorf("certificate: commit finalize renewal: %w", err)
+	}
+	return createdVersion, nil
 }
 
 func (s *PostgresStore) AddVersion(ctx context.Context, v Version) (Version, error) {

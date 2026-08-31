@@ -46,6 +46,16 @@ export default function AdminUsers() {
     setKeyScopes((prev) => (prev.includes(scope) ? prev.filter((s) => s !== scope) : [...prev, scope]));
   }
 
+  // keyName/keyScopes are one shared piece of state for every row's form —
+  // without resetting them here, opening the form for user B after typing
+  // into (and not submitting) user A's would carry A's name/scopes into
+  // B's form.
+  function startCreatingKeyFor(userId: string) {
+    setKeyName("");
+    setKeyScopes(["certs:read"]);
+    setCreatingKeyFor(userId);
+  }
+
   return (
     <>
       <h1>Users</h1>
@@ -126,7 +136,7 @@ export default function AdminUsers() {
                     </button>
                   </div>
                 ) : (
-                  <button className="secondary" onClick={() => setCreatingKeyFor(u.id)}>
+                  <button className="secondary" onClick={() => startCreatingKeyFor(u.id)}>
                     New API key
                   </button>
                 )}

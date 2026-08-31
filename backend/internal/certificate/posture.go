@@ -124,7 +124,11 @@ func probeTLS(ctx context.Context, addr string, serverName string, p *Posture) {
 }
 
 func keyUsageStrings(ku x509.KeyUsage) []string {
-	var out []string
+	// Never nil: this is serialized straight into Posture.KeyUsage with no
+	// omitempty, and a leaf with no KeyUsage extension bits set would
+	// otherwise encode as JSON null and crash the frontend's
+	// `.join(", ")` on it.
+	out := []string{}
 	add := func(flag x509.KeyUsage, name string) {
 		if ku&flag != 0 {
 			out = append(out, name)
@@ -151,7 +155,10 @@ func extKeyUsageStrings(eku []x509.ExtKeyUsage) []string {
 		x509.ExtKeyUsageTimeStamping:    "Time Stamping",
 		x509.ExtKeyUsageOCSPSigning:     "OCSP Signing",
 	}
-	var out []string
+	// Same reasoning as keyUsageStrings: never nil, since a leaf with no
+	// ExtKeyUsage entries would otherwise encode as JSON null and crash
+	// the frontend's `.length` check on it.
+	out := []string{}
 	for _, u := range eku {
 		if n, ok := names[u]; ok {
 			out = append(out, n)

@@ -243,9 +243,19 @@ func (s *Service) Validate(ctx context.Context, id string) (Order, error) {
 		return o, nil
 	}
 
+	// Claim the order with a conditional write (status still
+	// awaiting_validation) before doing anything to the CA — two
+	// concurrent Validate calls on the same order (a double-click, a
+	// client retry racing the renewal engine) would otherwise both pass
+	// the po.AllVerified() check above and both submit the CSR to the CA.
+	// The loser here sees claimed == false and returns without issuing.
 	o.Status = StatusIssuing
-	if err := s.orders.Update(ctx, o); err != nil {
+	claimed, err := s.orders.UpdateIfStatus(ctx, o, StatusAwaitingValidation)
+	if err != nil {
 		return Order{}, err
+	}
+	if !claimed {
+		return s.orders.Get(ctx, id)
 	}
 
 	signer, err := s.keys.Signer(ctx, o.KeyRef)
@@ -257,13 +267,26 @@ func (s *Service) Validate(ctx context.Context, id string) (Order, error) {
 		return s.fail(ctx, o, fmt.Sprintf("issue certificate: %v", err))
 	}
 
+	version := certificate.Version{
+		SerialNumber:      issued.SerialNumber,
+		FingerprintSHA256: issued.FingerprintSHA256,
+		PEMCert:           issued.PEMCert,
+		PEMChain:          issued.PEMChain,
+		IssuedAt:          issued.NotBefore,
+	}
+
+	// Both branches commit the certificate row and its version in one
+	// transaction (see FinalizeNewCertificate/FinalizeRenewal's own doc
+	// comments) — a certificate with an updated expiry but no matching
+	// version stored (or vice versa) would otherwise be possible if the
+	// second write failed after the first had already committed.
 	isRenewal := o.CertificateID != ""
 	if isRenewal {
-		if err := s.certs.UpdateAfterRenewal(ctx, o.CertificateID, issued.NotBefore, issued.NotAfter, issued.CAReference); err != nil {
-			return s.fail(ctx, o, fmt.Sprintf("update renewed certificate: %v", err))
+		if _, err := s.certs.FinalizeRenewal(ctx, o.CertificateID, issued.NotBefore, issued.NotAfter, issued.CAReference, version); err != nil {
+			return s.fail(ctx, o, fmt.Sprintf("finalize renewed certificate: %v", err))
 		}
 	} else {
-		cert, err := s.certs.Create(ctx, certificate.Certificate{
+		cert, _, err := s.certs.FinalizeNewCertificate(ctx, certificate.Certificate{
 			CommonName:         o.Domains[0],
 			SANs:               o.Domains,
 			CAProvider:         o.CAProvider,
@@ -283,22 +306,11 @@ func (s *Service) Validate(ctx context.Context, id string) (Order, error) {
 			Country:            o.Country,
 			State:              o.State,
 			Locality:           o.Locality,
-		})
+		}, version)
 		if err != nil {
 			return s.fail(ctx, o, fmt.Sprintf("store certificate: %v", err))
 		}
 		o.CertificateID = cert.ID
-	}
-
-	if _, err := s.certs.AddVersion(ctx, certificate.Version{
-		CertificateID:     o.CertificateID,
-		SerialNumber:      issued.SerialNumber,
-		FingerprintSHA256: issued.FingerprintSHA256,
-		PEMCert:           issued.PEMCert,
-		PEMChain:          issued.PEMChain,
-		IssuedAt:          issued.NotBefore,
-	}); err != nil {
-		return s.fail(ctx, o, fmt.Sprintf("store certificate version: %v", err))
 	}
 
 	now := time.Now()

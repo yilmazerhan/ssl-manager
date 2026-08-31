@@ -366,6 +366,8 @@ type bulkImportItemResult struct {
 }
 
 func (h *handlers) bulkImportCertificates(w http.ResponseWriter, r *http.Request) {
+	identity, _ := auth.IdentityFromContext(r.Context())
+
 	var req struct {
 		Certificates []struct {
 			PEMCert    string `json:"pem_cert"`
@@ -388,19 +390,28 @@ func (h *handlers) bulkImportCertificates(w http.ResponseWriter, r *http.Request
 
 	results := make([]bulkImportItemResult, 0, len(req.Certificates))
 	for _, item := range req.Certificates {
-		cert, version, err := certificate.ImportFromPEM(item.PEMCert, item.PEMChain, item.OwningTeam)
+		// Same team-scoping createOrder enforces: a non-admin (e.g.
+		// cert_manager, who also holds certs:issue) can only ever import
+		// into their own team, no matter what owning_team they send —
+		// otherwise a team's cert_manager could plant a certificate that
+		// appears owned by a team they have no access to.
+		owningTeam := item.OwningTeam
+		if identity.Role != user.RoleAdmin {
+			owningTeam = identity.Team
+		}
+		cert, version, err := certificate.ImportFromPEM(item.PEMCert, item.PEMChain, owningTeam)
 		if err != nil {
 			results = append(results, bulkImportItemResult{Error: err.Error()})
 			continue
 		}
-		created, err := h.deps.Certs.Create(r.Context(), cert)
+		// Create+version in one transaction (FinalizeNewCertificate) —
+		// two separate writes here would risk the same orphaned-
+		// certificate-with-no-version problem order.Service.Validate
+		// used to have if the second write failed after the first
+		// committed.
+		created, _, err := h.deps.Certs.FinalizeNewCertificate(r.Context(), cert, version)
 		if err != nil {
 			results = append(results, bulkImportItemResult{CommonName: cert.CommonName, Error: "could not store certificate"})
-			continue
-		}
-		version.CertificateID = created.ID
-		if _, err := h.deps.Certs.AddVersion(r.Context(), version); err != nil {
-			results = append(results, bulkImportItemResult{CommonName: cert.CommonName, CertificateID: created.ID, Error: "could not store certificate version"})
 			continue
 		}
 		h.audit(r, "imported", "certificate", created.ID, string(auth.ScopeCertsIssue), map[string]interface{}{"bulk": true})

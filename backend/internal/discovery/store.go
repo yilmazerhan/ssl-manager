@@ -38,6 +38,12 @@ type Store interface {
 
 	CreateSchedule(ctx context.Context, s Schedule) (Schedule, error)
 	UpdateSchedule(ctx context.Context, s Schedule) error
+	// RecordScheduleRun updates only the bookkeeping columns the
+	// scheduler itself owns (last_run_at/last_scan_id/next_run_at) — see
+	// Service.fireSchedule's own comment on why a full-row UpdateSchedule
+	// there would risk clobbering a concurrent admin edit to the
+	// schedule's actual configuration (name/targets/enabled/etc).
+	RecordScheduleRun(ctx context.Context, id string, lastRunAt, nextRunAt time.Time, lastScanID string) error
 	GetSchedule(ctx context.Context, id string) (Schedule, error)
 	ListSchedules(ctx context.Context) ([]Schedule, error)
 	DeleteSchedule(ctx context.Context, id string) error
@@ -292,6 +298,17 @@ func (s *PostgresStore) UpdateSchedule(ctx context.Context, sch Schedule) error 
 		sch.IntervalMinutes, sch.Enabled, sch.LastRunAt, nullableString(sch.LastScanID), sch.NextRunAt)
 	if err != nil {
 		return fmt.Errorf("discovery: update schedule: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) RecordScheduleRun(ctx context.Context, id string, lastRunAt, nextRunAt time.Time, lastScanID string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE discovery_schedule SET last_run_at = $2, last_scan_id = $3, next_run_at = $4, updated_at = now()
+		WHERE id = $1
+	`, id, lastRunAt, nullableString(lastScanID), nextRunAt)
+	if err != nil {
+		return fmt.Errorf("discovery: record schedule run: %w", err)
 	}
 	return nil
 }

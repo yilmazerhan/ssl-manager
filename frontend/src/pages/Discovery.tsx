@@ -40,6 +40,11 @@ export default function Discovery() {
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [showScheduleForm, setShowScheduleForm] = useState(false);
   const [editingScheduleID, setEditingScheduleID] = useState<string | null>(null);
+  // Not shown or edited by this form (there's no description input in the
+  // UI) — carried through purely so editing/pausing/resuming a schedule
+  // doesn't silently blank out a description set some other way (e.g.
+  // directly via the API).
+  const [schDescription, setSchDescription] = useState("");
   const [schName, setSchName] = useState("");
   const [schTargets, setSchTargets] = useState("");
   const [schPorts, setSchPorts] = useState("443");
@@ -129,6 +134,7 @@ export default function Discovery() {
 
   function resetScheduleForm() {
     setEditingScheduleID(null);
+    setSchDescription("");
     setSchName("");
     setSchTargets("");
     setSchPorts("443");
@@ -138,6 +144,7 @@ export default function Discovery() {
 
   function editSchedule(s: DiscoverySchedule) {
     setEditingScheduleID(s.id);
+    setSchDescription(s.description);
     setSchName(s.name);
     setSchTargets(s.targets.join(", "));
     setSchPorts(s.ports.join(", "));
@@ -148,6 +155,7 @@ export default function Discovery() {
   function scheduleRequestFromForm(enabled: boolean): ScheduleRequest {
     return {
       name: schName,
+      description: schDescription,
       targets: schTargets
         .split(",")
         .map((t) => t.trim())
@@ -184,6 +192,7 @@ export default function Discovery() {
     try {
       await api.updateSchedule(s.id, {
         name: s.name,
+        description: s.description,
         targets: s.targets,
         ports: s.ports,
         timeout_ms: s.timeout_ms,

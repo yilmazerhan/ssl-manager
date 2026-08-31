@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
@@ -21,6 +23,11 @@ import (
 // certificate SQL round trip (jsonb challenge storage, array columns,
 // foreign keys); skipped unless DATABASE_URL is set.
 func testService(t *testing.T) (*Service, string) {
+	svc, userID, _ := testServiceWithAuthority(t, &fakeInstantAuthority{})
+	return svc, userID
+}
+
+func testServiceWithAuthority(t *testing.T, authority ca.Authority) (*Service, string, certificate.Store) {
 	t.Helper()
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -60,8 +67,8 @@ func testService(t *testing.T) (*Service, string) {
 
 	certs := certificate.NewPostgresStore(pool)
 	orders := NewPostgresStore(pool)
-	authorities := ca.NewRegistry(&fakeInstantAuthority{})
-	return NewService(orders, certs, &fakeKeyManager{key: mustGenerateRSAKey(t)}, authorities), userID
+	authorities := ca.NewRegistry(authority)
+	return NewService(orders, certs, &fakeKeyManager{key: mustGenerateRSAKey(t)}, authorities), userID, certs
 }
 
 func mustGenerateRSAKey(t *testing.T) *rsa.PrivateKey {
@@ -112,6 +119,20 @@ func (a *fakeInstantAuthority) Issue(_ context.Context, _ ca.ProviderOrder, _ st
 
 func (a *fakeInstantAuthority) Revoke(_ context.Context, _, _ string) error { return nil }
 
+// countingAuthority wraps fakeInstantAuthority to count real Issue() calls
+// — the expensive, externally-visible CA operation that must never happen
+// twice for one order, no matter how many concurrent Validate calls race
+// each other.
+type countingAuthority struct {
+	fakeInstantAuthority
+	issueCount int32
+}
+
+func (a *countingAuthority) Issue(ctx context.Context, po ca.ProviderOrder, csr string, domains []string, signer crypto.Signer) (ca.IssuedCertificate, error) {
+	atomic.AddInt32(&a.issueCount, 1)
+	return a.fakeInstantAuthority.Issue(ctx, po, csr, domains, signer)
+}
+
 func TestService_CreateAndValidate_IssuesCertificate(t *testing.T) {
 	svc, userID := testService(t)
 	ctx := context.Background()
@@ -149,6 +170,59 @@ func TestService_CreateAndValidate_IssuesCertificate(t *testing.T) {
 	}
 	if validated.CertificateID == "" {
 		t.Fatalf("expected a certificate ID to be set")
+	}
+}
+
+// TestValidate_ConcurrentCallsIssueOnlyOnce proves two overlapping
+// Validate calls on the same order — a double-click, a client retry
+// racing the renewal engine's own retry loop — can't both pass the
+// AllVerified() check and both submit the CSR to the CA. Before the
+// UpdateIfStatus guard in Validate, both goroutines would observe
+// status == awaiting_validation and both call authority.Issue().
+func TestValidate_ConcurrentCallsIssueOnlyOnce(t *testing.T) {
+	authority := &countingAuthority{}
+	svc, userID, _ := testServiceWithAuthority(t, authority)
+	ctx := context.Background()
+
+	created, err := svc.Create(ctx, CreateRequest{
+		RequestedBy: userID, OwningTeam: "platform-test",
+		Domains: []string{"race-svc-test.example.com"}, CAProvider: "letsencrypt", ValidationMethod: "http-01",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	const n = 10
+	var wg sync.WaitGroup
+	results := make([]Order, n)
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = svc.Validate(ctx, created.ID)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Validate[%d]: %v", i, err)
+		}
+	}
+
+	if got := atomic.LoadInt32(&authority.issueCount); got != 1 {
+		t.Fatalf("expected exactly 1 CA Issue() call across %d concurrent Validate calls, got %d", n, got)
+	}
+
+	issuedSeen := false
+	for _, r := range results {
+		if r.Status == StatusIssued {
+			issuedSeen = true
+		}
+	}
+	if !issuedSeen {
+		t.Fatalf("expected at least one concurrent Validate call to observe the issued order")
 	}
 }
 

@@ -32,6 +32,17 @@ import (
 // exercises the real "no CA account behind this certificate" path bulkRevoke
 // takes for every certificate.ImportFromPEM result, rather than a mock.
 func testBulkServer(t *testing.T) (*httptest.Server, certificate.Store, string) {
+	server, certs, token, _ := testBulkServerAsRole(t, "admin", "platform")
+	return server, certs, token
+}
+
+// testBulkServerAsRole is testBulkServer generalized to mint the session
+// token for a user of the given role/team, so tests can exercise
+// non-admin, team-scoped access (e.g. a cert_manager) against the same
+// router/dependencies a real request would hit. Returns the user store too
+// so a test can mint a second token for a second user against the same
+// server.
+func testBulkServerAsRole(t *testing.T, role, team string) (*httptest.Server, certificate.Store, string, user.Store) {
 	t.Helper()
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -53,7 +64,7 @@ func testBulkServer(t *testing.T) (*httptest.Server, certificate.Store, string) 
 
 	email := "bulk-test-" + uuid.NewString() + "@example.com"
 	var userID string
-	if err := pool.QueryRow(ctx, `INSERT INTO app_user (email, role, team) VALUES ($1, 'admin', 'platform') RETURNING id`, email).Scan(&userID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO app_user (email, role, team) VALUES ($1, $2, $3) RETURNING id`, email, role, team).Scan(&userID); err != nil {
 		t.Fatalf("create test user: %v", err)
 	}
 	t.Cleanup(func() { pool.Exec(context.Background(), `DELETE FROM app_user WHERE id = $1`, userID) })
@@ -77,7 +88,7 @@ func testBulkServer(t *testing.T) (*httptest.Server, certificate.Store, string) 
 	})
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
-	return server, certs, token
+	return server, certs, token, users
 }
 
 func doJSON(t *testing.T, server *httptest.Server, token, method, path string, body interface{}) (*http.Response, []byte) {
@@ -176,6 +187,44 @@ func TestBulkImportCertificates_MixedSuccessAndFailure(t *testing.T) {
 	}
 	if stored.AutoRenew {
 		t.Errorf("expected an imported certificate to default to auto_renew=false")
+	}
+}
+
+// TestBulkImportCertificates_NonAdminCannotSpoofOwningTeam proves a
+// non-admin (here cert_manager, who also holds certs:issue and can call
+// this endpoint) can't import a certificate that appears owned by a team
+// they don't belong to just by sending a different owning_team in the
+// request body — the same team-scoping createOrder already enforces.
+func TestBulkImportCertificates_NonAdminCannotSpoofOwningTeam(t *testing.T) {
+	server, certs, token, _ := testBulkServerAsRole(t, "cert_manager", "team-a")
+	ctx := context.Background()
+
+	pemCert := mustSelfSignedCertPEM(t, "bulk-import-spoof-team.example.test")
+
+	resp, body := doJSON(t, server, token, "POST", "/api/v1/certificates/bulk-import", map[string]interface{}{
+		"certificates": []map[string]interface{}{
+			{"pem_cert": pemCert, "owning_team": "team-b"},
+		},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+	}
+
+	var results []bulkImportItemResult
+	if err := json.Unmarshal(body, &results); err != nil {
+		t.Fatalf("unmarshal response: %v (%s)", err, body)
+	}
+	if len(results) != 1 || !results[0].Success {
+		t.Fatalf("expected the import to succeed, got %+v", results)
+	}
+	t.Cleanup(func() { certs.Revoke(context.Background(), results[0].CertificateID) })
+
+	stored, err := certs.Get(ctx, results[0].CertificateID)
+	if err != nil {
+		t.Fatalf("Get imported certificate: %v", err)
+	}
+	if stored.OwningTeam != "team-a" {
+		t.Errorf("expected the certificate to be forced onto the requester's own team \"team-a\", got %q (requested owning_team was \"team-b\")", stored.OwningTeam)
 	}
 }
 

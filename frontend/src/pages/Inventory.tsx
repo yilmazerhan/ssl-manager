@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, BulkImportItemResult, BulkItemResult, Certificate, CertificateFilter } from "../api/client";
 import StatusPill from "../components/StatusPill";
@@ -37,17 +37,30 @@ export default function Inventory() {
   const canRevoke = hasScope("certs:admin");
   const canImport = hasScope("certs:issue");
 
+  // Every filter change fires a new request without canceling the last
+  // one — a fast typist in the team field can have several in flight at
+  // once. This id guards against an older response landing after a newer
+  // one and clobbering the table with stale results.
+  const latestRequestID = useRef(0);
+
   function refresh() {
+    const requestID = ++latestRequestID.current;
     setLoading(true);
     api
       .listCertificates(filter)
       .then((c) => {
+        if (requestID !== latestRequestID.current) return;
         setCerts(c);
         setError(null);
         setSelected(new Set());
       })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (requestID !== latestRequestID.current) return;
+        setError(e.message);
+      })
+      .finally(() => {
+        if (requestID === latestRequestID.current) setLoading(false);
+      });
   }
 
   useEffect(refresh, [filter]);

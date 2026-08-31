@@ -94,6 +94,43 @@ func TestComputePosture_ParsesSignatureAndKeyUsageFromPEM(t *testing.T) {
 	}
 }
 
+// TestComputePosture_KeyUsageNeverNilWhenExtensionAbsent proves a leaf
+// certificate with no KeyUsage/ExtKeyUsage extension bits set (common for
+// bulk-imported or some internal/ADCS-issued certs) still gets empty
+// slices, not a nil one — Posture.KeyUsage/ExtKeyUsage have no
+// `omitempty`, so a nil slice here would marshal as JSON null and crash
+// the frontend's `.join()`/`.length` calls on it.
+func TestComputePosture_KeyUsageNeverNilWhenExtensionAbsent(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "no-key-usage.example.test"},
+		DNSNames:     []string{"no-key-usage.example.test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		// Deliberately no KeyUsage or ExtKeyUsage set.
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	pemCert := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+
+	p, err := ComputePosture(context.Background(), pemCert, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("ComputePosture: %v", err)
+	}
+	if p.KeyUsage == nil {
+		t.Errorf("expected KeyUsage to be an empty slice, not nil")
+	}
+	if p.ExtKeyUsage == nil {
+		t.Errorf("expected ExtKeyUsage to be an empty slice, not nil")
+	}
+}
+
 func TestComputePosture_RejectsInvalidPEM(t *testing.T) {
 	if _, err := ComputePosture(context.Background(), "not a pem", "127.0.0.1"); err == nil {
 		t.Fatalf("expected an error for invalid PEM input")

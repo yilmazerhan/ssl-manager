@@ -149,6 +149,27 @@ func (f *fakeCertStore) LatestVersion(_ context.Context, id string) (certificate
 	return vs[len(vs)-1], nil
 }
 
+func (f *fakeCertStore) FinalizeNewCertificate(ctx context.Context, c certificate.Certificate, v certificate.Version) (certificate.Certificate, certificate.Version, error) {
+	created, err := f.Create(ctx, c)
+	if err != nil {
+		return certificate.Certificate{}, certificate.Version{}, err
+	}
+	v.CertificateID = created.ID
+	createdVersion, err := f.AddVersion(ctx, v)
+	if err != nil {
+		return certificate.Certificate{}, certificate.Version{}, err
+	}
+	return created, createdVersion, nil
+}
+
+func (f *fakeCertStore) FinalizeRenewal(ctx context.Context, id string, notBefore, notAfter time.Time, caReference string, v certificate.Version) (certificate.Version, error) {
+	if err := f.UpdateAfterRenewal(ctx, id, notBefore, notAfter, caReference); err != nil {
+		return certificate.Version{}, err
+	}
+	v.CertificateID = id
+	return f.AddVersion(ctx, v)
+}
+
 type fakeOrderStore struct {
 	mu     sync.Mutex
 	orders map[string]order.Order
@@ -183,6 +204,17 @@ func (f *fakeOrderStore) Update(_ context.Context, o order.Order) error {
 	defer f.mu.Unlock()
 	f.orders[o.ID] = o
 	return nil
+}
+
+func (f *fakeOrderStore) UpdateIfStatus(_ context.Context, o order.Order, expected order.Status) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	existing, ok := f.orders[o.ID]
+	if !ok || existing.Status != expected {
+		return false, nil
+	}
+	f.orders[o.ID] = o
+	return true, nil
 }
 
 // fakeKeyManager signs with an in-memory RSA key — no Vault involved. It
