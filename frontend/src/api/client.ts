@@ -402,6 +402,8 @@ export const api = {
     request<K8sTarget>(`/certificates/${certificateId}/k8s-targets/${targetId}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteK8sTarget: (certificateId: string, targetId: string) =>
     request<{ status: string }>(`/certificates/${certificateId}/k8s-targets/${targetId}`, { method: "DELETE" }),
+  syncK8sTarget: (certificateId: string, targetId: string) =>
+    request<{ status: string }>(`/certificates/${certificateId}/k8s-targets/${targetId}/sync`, { method: "POST" }),
   listWinRMTargets: (certificateId: string) => request<WinRMTarget[]>(`/certificates/${certificateId}/winrm-targets`),
   createWinRMTarget: (certificateId: string, body: WinRMTargetRequest) =>
     request<WinRMTarget>(`/certificates/${certificateId}/winrm-targets`, { method: "POST", body: JSON.stringify(body) }),
@@ -409,6 +411,8 @@ export const api = {
     request<WinRMTarget>(`/certificates/${certificateId}/winrm-targets/${targetId}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteWinRMTarget: (certificateId: string, targetId: string) =>
     request<{ status: string }>(`/certificates/${certificateId}/winrm-targets/${targetId}`, { method: "DELETE" }),
+  syncWinRMTarget: (certificateId: string, targetId: string) =>
+    request<{ status: string }>(`/certificates/${certificateId}/winrm-targets/${targetId}/sync`, { method: "POST" }),
   renewCertificate: (id: string) => request<CertificateOrder>(`/certificates/${id}/renew`, { method: "POST" }),
   revokeCertificate: (id: string) => request<{ status: string }>(`/certificates/${id}/revoke`, { method: "POST" }),
   bulkImportCertificates: (certificates: BulkImportItem[]) =>

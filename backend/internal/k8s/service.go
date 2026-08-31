@@ -57,7 +57,22 @@ func (s *Service) CreateTarget(ctx context.Context, certificateID string, req Ta
 	if err := s.secrets.Put(ctx, secretPath(created.ID), map[string]interface{}{"token": req.Token}); err != nil {
 		return Target{}, fmt.Errorf("k8s: store cluster token: %w", err)
 	}
-	return created, nil
+
+	// Push immediately rather than waiting for the certificate's next
+	// issuance/renewal — a sync failure here (bad host, closed firewall)
+	// must not fail target creation; the admin can fix it and retry via
+	// SyncTarget ("Sync now" in the UI).
+	certPEM, keyPEM, err := s.loadSyncMaterial(ctx, certificateID)
+	if err != nil {
+		log.Printf("k8s: initial sync for new target %s: %v", created.ID, err)
+		return created, nil
+	}
+	s.syncOne(ctx, created, certPEM, keyPEM)
+	synced, err := s.store.Get(ctx, created.ID)
+	if err != nil {
+		return created, nil
+	}
+	return synced, nil
 }
 
 // UpdateTarget edits everything except which certificate it belongs to.
@@ -111,33 +126,64 @@ func (s *Service) SyncCertificate(ctx context.Context, certificateID string) {
 		return
 	}
 
-	cert, err := s.certs.Get(ctx, certificateID)
+	certPEM, keyPEM, err := s.loadSyncMaterial(ctx, certificateID)
 	if err != nil {
-		log.Printf("k8s: load certificate %s: %v", certificateID, err)
-		return
-	}
-	if !cert.KeyExportable {
-		log.Printf("k8s: certificate %s has sync targets but its key isn't exportable; skipping", certificateID)
-		return
-	}
-	version, err := s.certs.LatestVersion(ctx, certificateID)
-	if err != nil {
-		log.Printf("k8s: load latest version for certificate %s: %v", certificateID, err)
-		return
-	}
-	keyPEM, err := s.keys.ExportPrivateKey(ctx, cert.KeyRef)
-	if err != nil {
-		log.Printf("k8s: export private key for certificate %s: %v", certificateID, err)
+		log.Printf("k8s: %v", err)
 		return
 	}
 
-	certPEM := []byte(version.PEMCert + version.PEMChain)
 	for _, target := range targets {
 		if !target.Enabled {
 			continue
 		}
 		s.syncOne(ctx, target, certPEM, keyPEM)
 	}
+}
+
+// SyncTarget re-pushes certificateID's current cert/chain/key to a single
+// target on demand (the "Sync now" action), returning the failure as a
+// real error instead of only logging and recording it, since this path
+// always has an admin waiting on the result.
+func (s *Service) SyncTarget(ctx context.Context, targetID string) error {
+	target, err := s.store.Get(ctx, targetID)
+	if err != nil {
+		return err
+	}
+	certPEM, keyPEM, err := s.loadSyncMaterial(ctx, target.CertificateID)
+	if err != nil {
+		return err
+	}
+	s.syncOne(ctx, target, certPEM, keyPEM)
+	updated, err := s.store.Get(ctx, targetID)
+	if err != nil {
+		return err
+	}
+	if updated.LastSyncError != "" {
+		return fmt.Errorf("k8s: %s", updated.LastSyncError)
+	}
+	return nil
+}
+
+// loadSyncMaterial loads and exports everything needed to push
+// certificateID to a target: the current cert+chain PEM and the
+// certificate's private key PEM.
+func (s *Service) loadSyncMaterial(ctx context.Context, certificateID string) (certPEM, keyPEM []byte, err error) {
+	cert, err := s.certs.Get(ctx, certificateID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load certificate %s: %w", certificateID, err)
+	}
+	if !cert.KeyExportable {
+		return nil, nil, fmt.Errorf("certificate %s's key isn't exportable", certificateID)
+	}
+	version, err := s.certs.LatestVersion(ctx, certificateID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load latest version for certificate %s: %w", certificateID, err)
+	}
+	keyPEM, err = s.keys.ExportPrivateKey(ctx, cert.KeyRef)
+	if err != nil {
+		return nil, nil, fmt.Errorf("export private key for certificate %s: %w", certificateID, err)
+	}
+	return []byte(version.PEMCert + version.PEMChain), keyPEM, nil
 }
 
 func (s *Service) syncOne(ctx context.Context, target Target, certPEM, keyPEM []byte) {

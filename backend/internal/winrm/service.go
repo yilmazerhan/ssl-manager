@@ -63,7 +63,22 @@ func (s *Service) CreateTarget(ctx context.Context, certificateID string, req Ta
 	if err := s.secrets.Put(ctx, secretPath(created.ID), map[string]interface{}{"password": req.Password}); err != nil {
 		return Target{}, fmt.Errorf("winrm: store credential: %w", err)
 	}
-	return created, nil
+
+	// Push immediately rather than waiting for the certificate's next
+	// issuance/renewal — a sync failure here (bad host, closed firewall,
+	// WinRM auth failure) must not fail target creation; the admin can fix
+	// it and retry via SyncTarget ("Sync now" in the UI).
+	pfx, err := s.loadSyncMaterial(ctx, certificateID)
+	if err != nil {
+		log.Printf("winrm: initial sync for new target %s: %v", created.ID, err)
+		return created, nil
+	}
+	s.syncOne(ctx, created, pfx)
+	synced, err := s.store.Get(ctx, created.ID)
+	if err != nil {
+		return created, nil
+	}
+	return synced, nil
 }
 
 // UpdateTarget edits everything except which certificate it belongs to.
@@ -119,28 +134,9 @@ func (s *Service) SyncCertificate(ctx context.Context, certificateID string) {
 		return
 	}
 
-	cert, err := s.certs.Get(ctx, certificateID)
+	pfx, err := s.loadSyncMaterial(ctx, certificateID)
 	if err != nil {
-		log.Printf("winrm: load certificate %s: %v", certificateID, err)
-		return
-	}
-	if !cert.KeyExportable {
-		log.Printf("winrm: certificate %s has sync targets but its key isn't exportable; skipping", certificateID)
-		return
-	}
-	version, err := s.certs.LatestVersion(ctx, certificateID)
-	if err != nil {
-		log.Printf("winrm: load latest version for certificate %s: %v", certificateID, err)
-		return
-	}
-	keyPEM, err := s.keys.ExportPrivateKey(ctx, cert.KeyRef)
-	if err != nil {
-		log.Printf("winrm: export private key for certificate %s: %v", certificateID, err)
-		return
-	}
-	pfx, err := buildPFX([]byte(version.PEMCert+version.PEMChain), keyPEM, pfxPassword)
-	if err != nil {
-		log.Printf("winrm: build PFX for certificate %s: %v", certificateID, err)
+		log.Printf("winrm: %v", err)
 		return
 	}
 
@@ -150,6 +146,56 @@ func (s *Service) SyncCertificate(ctx context.Context, certificateID string) {
 		}
 		s.syncOne(ctx, target, pfx)
 	}
+}
+
+// SyncTarget re-pushes certificateID's current cert/chain/key to a single
+// target on demand (the "Sync now" action), returning the failure as a
+// real error instead of only logging and recording it, since this path
+// always has an admin waiting on the result.
+func (s *Service) SyncTarget(ctx context.Context, targetID string) error {
+	target, err := s.store.Get(ctx, targetID)
+	if err != nil {
+		return err
+	}
+	pfx, err := s.loadSyncMaterial(ctx, target.CertificateID)
+	if err != nil {
+		return err
+	}
+	s.syncOne(ctx, target, pfx)
+	updated, err := s.store.Get(ctx, targetID)
+	if err != nil {
+		return err
+	}
+	if updated.LastSyncError != "" {
+		return fmt.Errorf("winrm: %s", updated.LastSyncError)
+	}
+	return nil
+}
+
+// loadSyncMaterial loads and exports everything needed to push
+// certificateID to a target: a freshly built PFX containing the current
+// cert, chain, and private key.
+func (s *Service) loadSyncMaterial(ctx context.Context, certificateID string) ([]byte, error) {
+	cert, err := s.certs.Get(ctx, certificateID)
+	if err != nil {
+		return nil, fmt.Errorf("load certificate %s: %w", certificateID, err)
+	}
+	if !cert.KeyExportable {
+		return nil, fmt.Errorf("certificate %s's key isn't exportable", certificateID)
+	}
+	version, err := s.certs.LatestVersion(ctx, certificateID)
+	if err != nil {
+		return nil, fmt.Errorf("load latest version for certificate %s: %w", certificateID, err)
+	}
+	keyPEM, err := s.keys.ExportPrivateKey(ctx, cert.KeyRef)
+	if err != nil {
+		return nil, fmt.Errorf("export private key for certificate %s: %w", certificateID, err)
+	}
+	pfx, err := buildPFX([]byte(version.PEMCert+version.PEMChain), keyPEM, pfxPassword)
+	if err != nil {
+		return nil, fmt.Errorf("build PFX for certificate %s: %w", certificateID, err)
+	}
+	return pfx, nil
 }
 
 func (s *Service) syncOne(ctx context.Context, target Target, pfx []byte) {

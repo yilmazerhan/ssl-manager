@@ -463,6 +463,24 @@ func (h *handlers) deleteK8sTarget(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+func (h *handlers) syncK8sTarget(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	targetID := r.PathValue("targetId")
+	if err := h.deps.K8s.SyncTarget(r.Context(), targetID); err != nil {
+		if errors.Is(err, k8s.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "Kubernetes sync target not found")
+			return
+		}
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	h.audit(r, "k8s_target_synced", "certificate", cert.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{"target_id": targetID})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "synced"})
+}
+
 func (h *handlers) listWinRMTargets(w http.ResponseWriter, r *http.Request) {
 	cert, ok := h.loadCertificateForTeam(w, r)
 	if !ok {
@@ -532,6 +550,24 @@ func (h *handlers) deleteWinRMTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	h.audit(r, "winrm_target_deleted", "certificate", cert.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{"target_id": targetID})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *handlers) syncWinRMTarget(w http.ResponseWriter, r *http.Request) {
+	cert, ok := h.loadCertificateForTeam(w, r)
+	if !ok {
+		return
+	}
+	targetID := r.PathValue("targetId")
+	if err := h.deps.WinRM.SyncTarget(r.Context(), targetID); err != nil {
+		if errors.Is(err, winrm.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "WinRM sync target not found")
+			return
+		}
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	h.audit(r, "winrm_target_synced", "certificate", cert.ID, string(auth.ScopeCertsAdmin), map[string]interface{}{"target_id": targetID})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "synced"})
 }
 
 func (h *handlers) createOrder(w http.ResponseWriter, r *http.Request) {

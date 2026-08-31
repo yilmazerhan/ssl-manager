@@ -226,13 +226,80 @@ func TestSyncCertificate_SkipsDisabledTargets(t *testing.T) {
 		t.Fatalf("UpdateTarget (disable): %v", err)
 	}
 
+	// CreateTarget already attempted an immediate sync-on-create (recording
+	// a failure, since the target is unreachable) before it was disabled;
+	// capture that so we can prove SyncCertificate leaves it untouched.
+	beforeResync, err := store.Get(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("Get (before resync): %v", err)
+	}
+	if beforeResync.LastSyncedAt == nil {
+		t.Fatalf("expected the target's immediate sync-on-create to have set last_synced_at")
+	}
+
 	svc.SyncCertificate(ctx, cert.ID)
 
 	reloaded, err := store.Get(ctx, target.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if reloaded.LastSyncedAt != nil {
-		t.Errorf("expected a disabled target to be skipped entirely, not attempted")
+	if !reloaded.LastSyncedAt.Equal(*beforeResync.LastSyncedAt) {
+		t.Errorf("expected a disabled target to be skipped entirely by SyncCertificate, but its last_synced_at changed")
+	}
+}
+
+// TestCreateTarget_SyncsImmediately proves a newly created WinRM target is
+// pushed right away rather than waiting for the certificate's next
+// issuance/renewal — the returned Target should already reflect that
+// first attempt's outcome (here, a recorded failure, since there's no
+// real WinRM host in this test to succeed against).
+func TestCreateTarget_SyncsImmediately(t *testing.T) {
+	svc, certs, store, _ := testService(t)
+	ctx := context.Background()
+	cert := mustExportableCert(t, certs, true)
+	certPEM, _, _ := mustSelfSignedPEM(t, cert.CommonName, 3)
+	if _, err := certs.AddVersion(ctx, certificate.Version{
+		CertificateID: cert.ID, SerialNumber: "1", FingerprintSHA256: "abc", PEMCert: string(certPEM), PEMChain: "", IssuedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddVersion: %v", err)
+	}
+
+	target, err := svc.CreateTarget(ctx, cert.ID, TargetRequest{
+		Name: "immediate", Host: "127.0.0.1", Port: 1, Username: "admin", Password: "pw", ServiceType: ServiceLDAPS, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("expected CreateTarget to succeed even though the immediate sync fails, got: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), target.ID) })
+
+	if target.LastSyncedAt == nil {
+		t.Errorf("expected the target returned by CreateTarget to already have last_synced_at set")
+	}
+	if target.LastSyncError == "" {
+		t.Errorf("expected the failed immediate sync's error to be recorded on the created target")
+	}
+}
+
+func TestSyncTarget_ReturnsErrorMatchingRecordedFailure(t *testing.T) {
+	svc, certs, store, _ := testService(t)
+	ctx := context.Background()
+	cert := mustExportableCert(t, certs, true)
+	certPEM, _, _ := mustSelfSignedPEM(t, cert.CommonName, 4)
+	if _, err := certs.AddVersion(ctx, certificate.Version{
+		CertificateID: cert.ID, SerialNumber: "1", FingerprintSHA256: "abc", PEMCert: string(certPEM), PEMChain: "", IssuedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddVersion: %v", err)
+	}
+
+	target, err := svc.CreateTarget(ctx, cert.ID, TargetRequest{
+		Name: "unreachable", Host: "127.0.0.1", Port: 1, Username: "admin", Password: "pw", ServiceType: ServiceLDAPS, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateTarget: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), target.ID) })
+
+	if err := svc.SyncTarget(ctx, target.ID); err == nil {
+		t.Fatalf("expected SyncTarget to return an error for an unreachable host")
 	}
 }

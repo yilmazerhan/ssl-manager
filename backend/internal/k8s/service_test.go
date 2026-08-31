@@ -196,6 +196,18 @@ func TestSyncCertificate_SyncsEnabledTargetsAndSkipsDisabled(t *testing.T) {
 		t.Fatalf("UpdateTarget (disable): %v", err)
 	}
 
+	disabledBeforeResync, err := store.Get(ctx, disabled.ID)
+	if err != nil {
+		t.Fatalf("Get disabled target (before resync): %v", err)
+	}
+	if disabledBeforeResync.LastSyncedAt == nil {
+		t.Fatalf("expected the disabled target to already have a last_synced_at from its immediate sync-on-create")
+	}
+
+	// CreateTarget already synced both targets once (immediate-sync-on-
+	// create); reset the counter so this only measures SyncCertificate's
+	// own fan-out.
+	syncCount = 0
 	svc.SyncCertificate(ctx, cert.ID)
 
 	if syncCount != 1 {
@@ -217,8 +229,8 @@ func TestSyncCertificate_SyncsEnabledTargetsAndSkipsDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get disabled target: %v", err)
 	}
-	if reloadedDisabled.LastSyncedAt != nil {
-		t.Errorf("expected the disabled target to be skipped entirely")
+	if !reloadedDisabled.LastSyncedAt.Equal(*disabledBeforeResync.LastSyncedAt) {
+		t.Errorf("expected the disabled target to be skipped entirely by SyncCertificate, but its last_synced_at changed")
 	}
 }
 
@@ -248,5 +260,131 @@ func TestSyncCertificate_RecordsErrorWithoutPanicking(t *testing.T) {
 	}
 	if reloaded.LastSyncError == "" {
 		t.Errorf("expected a sync error to be recorded for an unreachable cluster")
+	}
+}
+
+// TestCreateTarget_SyncsImmediately proves a newly created target is
+// pushed right away rather than waiting for the certificate's next
+// issuance/renewal — the returned Target should already reflect that
+// first attempt's outcome.
+func TestCreateTarget_SyncsImmediately(t *testing.T) {
+	svc, certs, store, _ := testService(t)
+	ctx := context.Background()
+	cert := mustExportableCert(t, certs, true)
+	if _, err := certs.AddVersion(ctx, certificate.Version{
+		CertificateID: cert.ID, SerialNumber: "1", FingerprintSHA256: "abc", PEMCert: "cert-pem", PEMChain: "chain-pem", IssuedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddVersion: %v", err)
+	}
+
+	var syncCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		syncCount++
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	target, err := svc.CreateTarget(ctx, cert.ID, TargetRequest{
+		Name: "immediate", ClusterURL: server.URL, Namespace: "default", SecretName: "app-tls", Token: "tok", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateTarget: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), target.ID) })
+
+	if syncCount != 1 {
+		t.Errorf("expected CreateTarget to push once immediately, got %d sync calls", syncCount)
+	}
+	if target.LastSyncedAt == nil {
+		t.Errorf("expected the target returned by CreateTarget to already have last_synced_at set")
+	}
+	if target.LastSyncError != "" {
+		t.Errorf("expected no sync error, got %q", target.LastSyncError)
+	}
+}
+
+// TestCreateTarget_SyncFailureDoesNotFailCreate proves a target whose
+// first push fails (bad host, closed firewall) is still created — the
+// failure is recorded on the target, not returned as a CreateTarget error,
+// so the admin can retry via SyncTarget after fixing the issue.
+func TestCreateTarget_SyncFailureDoesNotFailCreate(t *testing.T) {
+	svc, certs, store, _ := testService(t)
+	ctx := context.Background()
+	cert := mustExportableCert(t, certs, true)
+	if _, err := certs.AddVersion(ctx, certificate.Version{
+		CertificateID: cert.ID, SerialNumber: "1", FingerprintSHA256: "abc", PEMCert: "cert-pem", PEMChain: "", IssuedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddVersion: %v", err)
+	}
+
+	target, err := svc.CreateTarget(ctx, cert.ID, TargetRequest{
+		Name: "unreachable", ClusterURL: "http://127.0.0.1:1", Namespace: "default", SecretName: "app-tls", Token: "tok", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("expected CreateTarget to succeed even though the immediate sync fails, got: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), target.ID) })
+
+	if target.LastSyncError == "" {
+		t.Errorf("expected the failed immediate sync's error to be recorded on the created target")
+	}
+}
+
+func TestSyncTarget_ReturnsErrorMatchingRecordedFailure(t *testing.T) {
+	svc, certs, store, _ := testService(t)
+	ctx := context.Background()
+	cert := mustExportableCert(t, certs, true)
+	if _, err := certs.AddVersion(ctx, certificate.Version{
+		CertificateID: cert.ID, SerialNumber: "1", FingerprintSHA256: "abc", PEMCert: "cert-pem", PEMChain: "", IssuedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddVersion: %v", err)
+	}
+
+	target, err := svc.CreateTarget(ctx, cert.ID, TargetRequest{
+		Name: "unreachable", ClusterURL: "http://127.0.0.1:1", Namespace: "default", SecretName: "app-tls", Token: "tok", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateTarget: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), target.ID) })
+
+	if err := svc.SyncTarget(ctx, target.ID); err == nil {
+		t.Fatalf("expected SyncTarget to return an error for an unreachable cluster")
+	}
+}
+
+func TestSyncTarget_ReturnsNilOnSuccess(t *testing.T) {
+	svc, certs, store, _ := testService(t)
+	ctx := context.Background()
+	cert := mustExportableCert(t, certs, true)
+	if _, err := certs.AddVersion(ctx, certificate.Version{
+		CertificateID: cert.ID, SerialNumber: "1", FingerprintSHA256: "abc", PEMCert: "cert-pem", PEMChain: "chain-pem", IssuedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddVersion: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	target, err := svc.CreateTarget(ctx, cert.ID, TargetRequest{
+		Name: "ok", ClusterURL: server.URL, Namespace: "default", SecretName: "app-tls", Token: "tok", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateTarget: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), target.ID) })
+
+	if err := svc.SyncTarget(ctx, target.ID); err != nil {
+		t.Errorf("expected SyncTarget to succeed, got: %v", err)
 	}
 }

@@ -141,6 +141,18 @@ export default function CertificateDetail() {
     }
   }
 
+  async function syncK8sTarget(targetId: string) {
+    if (!id) return;
+    setK8sError(null);
+    try {
+      await api.syncK8sTarget(id, targetId);
+    } catch (e) {
+      setK8sError((e as Error).message);
+    } finally {
+      refreshK8sTargets();
+    }
+  }
+
   const [winrmTargets, setWinrmTargets] = useState<WinRMTarget[]>([]);
   const [winrmError, setWinrmError] = useState<string | null>(null);
   const [showWinrmForm, setShowWinrmForm] = useState(false);
@@ -228,6 +240,18 @@ export default function CertificateDetail() {
       refreshWinrmTargets();
     } catch (e) {
       setWinrmError((e as Error).message);
+    }
+  }
+
+  async function syncWinrmTarget(targetId: string) {
+    if (!id) return;
+    setWinrmError(null);
+    try {
+      await api.syncWinRMTarget(id, targetId);
+    } catch (e) {
+      setWinrmError((e as Error).message);
+    } finally {
+      refreshWinrmTargets();
     }
   }
 
@@ -517,6 +541,9 @@ export default function CertificateDetail() {
                     <td style={{ display: "flex", gap: 6 }}>
                       {hasScope("certs:admin") && (
                         <>
+                          <button className="secondary" onClick={() => syncK8sTarget(t.id)}>
+                            Sync now
+                          </button>
                           <button className="secondary" onClick={() => editK8sTarget(t)}>
                             Edit
                           </button>
@@ -651,6 +678,9 @@ export default function CertificateDetail() {
                     <td style={{ display: "flex", gap: 6 }}>
                       {hasScope("certs:admin") && (
                         <>
+                          <button className="secondary" onClick={() => syncWinrmTarget(t.id)}>
+                            Sync now
+                          </button>
                           <button className="secondary" onClick={() => editWinrmTarget(t)}>
                             Edit
                           </button>
